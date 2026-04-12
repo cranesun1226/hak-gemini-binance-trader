@@ -8,6 +8,7 @@ HAK GEMINI BINANCE TRADER는 변동성 기반 포지션 사이징, Gemini 기반
 HAK GEMINI BINANCE TRADER is an automated BTC/USDT futures trading system developed by incorporating Investing AI PO “Crane Sun”’s three years of LLM-based cryptocurrency trading expertise, including volatility-based position sizing, Gemini-based trend analysis, coin price fluctuations and hourly parallel scheduling, and order execution that accounts for exchange constraints.
 
 > Risk Notice: This repository is provided for research and educational purposes only. It is not financial advice. Use at your own risk, and test in a paper or demo environment before deploying with real funds.
+>
 > 리스크 고지: 이 저장소는 연구 목적의 자료이며 금융 조언이 아닙니다. 사용에 따른 책임은 사용자 본인에게 있으며, 실제 자금을 투입하기 전에 반드시 모의 또는 데모 환경에서 먼저 테스트하세요.
 
 ## Research Thesis | 연구 가설과 자동화 우위
