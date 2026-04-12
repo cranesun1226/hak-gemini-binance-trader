@@ -1,0 +1,62 @@
+"""Runtime configuration defaults and loader helpers."""
+
+import os
+from copy import deepcopy
+from typing import Any, Dict
+
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - exercised in lightweight test environments
+    class _YamlFallback:
+        @staticmethod
+        def safe_load(*_args, **_kwargs):
+            return {}
+
+    yaml = _YamlFallback()
+
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+CONFIG_PATH = os.path.join(ROOT_DIR, "setting.yaml")
+
+# Runtime defaults live here so optional keys can be omitted from setting.yaml.
+DEFAULT_GEMINI_API_VERSION = "v1beta"
+DEFAULT_GEMINI_THINKING_LEVEL = "high"
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "symbol": "BTCUSDT",
+    "cycle_interval_seconds": 60,
+    "trigger_pct_usdt": 0.5,
+    "fixed_leverage": 10,
+    "stop_loss_pct": 0.01,
+    "ai_candle_count_per_timeframe": 24,
+    "position_sizing_daily_sample_days": 100,
+    "position_sizing_live_window_hours": 24,
+    "position_size_ratio_min": 0.015,
+    "position_size_ratio_max": 0.995,
+    "gemini_api_version": DEFAULT_GEMINI_API_VERSION,
+    "gemini_thinking_level": DEFAULT_GEMINI_THINKING_LEVEL,
+}
+
+
+def get_default_config() -> Dict[str, Any]:
+    """Return a deep-copied default configuration payload."""
+    return deepcopy(DEFAULT_CONFIG)
+
+
+def get_default_config_value(key: str, default: Any = None) -> Any:
+    """Return one default config value without exposing shared mutable state."""
+    return deepcopy(DEFAULT_CONFIG.get(key, default))
+
+
+def load_runtime_config(config_path: str = CONFIG_PATH) -> Dict[str, Any]:
+    """Load runtime config from disk and merge it on top of the defaults."""
+    config = get_default_config()
+    try:
+        with open(config_path, "r", encoding="utf-8") as file_obj:
+            loaded = yaml.safe_load(file_obj) or {}
+    except Exception:
+        return config
+
+    if isinstance(loaded, dict):
+        config.update(loaded)
+    return config

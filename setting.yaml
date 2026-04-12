@@ -1,0 +1,63 @@
+# ================================================================================
+# HAK GEMINI BINANCE TRADER - setting.yaml
+# ================================================================================
+
+# ================================================================================
+# 거래 대상 및 실행 주기
+# Trading Symbol & Cycle
+# ================================================================================
+# 감시 및 거래 대상 심볼이며 현재 런타임에서는 BTCUSDT만 허용됩니다.
+# Trading symbol to monitor and trade; the current runtime only allows BTCUSDT.
+symbol: BTCUSDT
+
+# 전략 실행 루프를 몇 초 간격으로 반복할지 설정합니다.
+# Sets how many seconds to wait between each strategy execution cycle.
+cycle_interval_seconds: 60
+
+# 마지막 트리거 기준가에서 몇 % 움직이면 AI 판단을 다시 요청할지 설정하며 0.5는 0.5%를 뜻합니다.
+# Sets the percent move from the last trigger price needed to request a new AI decision; 0.5 means 0.5%.
+trigger_pct_usdt: 0.5
+
+# ================================================================================
+# AI 입력 및 추론 설정
+# AI Input & Reasoning
+# ================================================================================
+# 각 타임프레임(현재 1d, 1h)별로 AI 프롬프트에 포함할 최근 캔들 개수입니다.
+# Number of recent candles per timeframe, currently 1d and 1h, included in the AI prompt.
+ai_candle_count_per_timeframe: 24
+
+# Gemini 추론 강도를 설정하며 minimal, low, medium, high 중 하나를 사용합니다.
+# Sets the Gemini reasoning level; use one of minimal, low, medium, or high.
+gemini_thinking_level: high
+
+# ================================================================================
+# 리스크 관리
+# Risk Management
+# ================================================================================
+# 포지션 진입 시 고정으로 적용할 레버리지 배수입니다.
+# Fixed leverage multiplier applied when opening a position.
+fixed_leverage: 10
+
+# 진입가 대비 손절 비율이며 0.01은 1% 손절을 의미합니다. 레버리지를 적용하면, 10배 기준 10% 손절입니다.
+# Stop-loss ratio relative to entry price; 0.01 means a 1% stop loss. When leverage is applied, the stop-loss is set at 10% based on a 10x leverage ratio.
+stop_loss_pct: 0.01
+
+# ================================================================================
+# 변동성 기반 포지션 사이징
+# Volatility-Based Position Sizing
+# ================================================================================
+# 일봉 변동성 백분위 계산에 사용할 과거 일봉 샘플 개수입니다.
+# Number of historical daily candles used for volatility percentile calculations.
+position_sizing_daily_sample_days: 100
+
+# 현재 변동성 계산에 사용할 최근 1시간봉 구간 길이입니다.
+# Length of the recent 1-hour candle window used to measure current volatility.
+position_sizing_live_window_hours: 24
+
+# 변동성이 낮아도 최소 이 비율만큼 증거금을 사용하도록 하한선을 둡니다.
+# Lower bound on margin usage so sizing does not fall below this ratio even in low volatility.
+position_size_ratio_min: 0.015
+
+# 변동성이 높아도 최대 이 비율까지만 증거금을 사용하도록 상한선을 둡니다.
+# Upper bound on margin usage so sizing does not exceed this ratio even in high volatility.
+position_size_ratio_max: 0.995

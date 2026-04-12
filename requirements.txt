@@ -1,0 +1,4 @@
+google-genai>=1.72.0
+PyYAML>=6.0.3
+pydantic>=2.12.5
+requests>=2.33.1
