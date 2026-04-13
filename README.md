@@ -19,7 +19,7 @@ This system is built on a clear research conclusion: do not ask an LLM to do eve
 
 포지션 사이징은 반대로 최대한 기계적이어야 했습니다. 크랜선이 직접 수행한 연구와 백테스트에서, 현재 최대 레버리지 10배 조건에서는 현재 변동성을 과거 변동성 분포와 비교해 익스포저를 정하는 방식이 가장 좋은 성과를 가져왔고, 이 저장소는 그 결론을 자동매매 로직으로 그대로 옮겼습니다. 즉 Gemini는 방향만 판단하고, 시스템은 현재 24시간 변동성을 과거 일봉 변동성 분포에 대입해 목표 증거금 비율과 실효 레버리지를 계산한 뒤 Binance Futures 제약에 맞는 수량 계산, 포지션 리밸런싱, 손절 동기화까지 자동으로 수행합니다.
 
-Position sizing, by contrast, proved most effective when handled mechanically. In Crane Sun's direct research and backtesting, the strongest results under the current 10x maximum leverage framework came from sizing exposure by comparing current volatility against the historical volatility distribution. That conclusion is automated here end to end: Gemini decides direction, while the runtime converts the current 24-hour volatility regime into a target margin ratio and effective leverage, then carries it through exchange-valid quantity planning, position rebalancing, and stop-loss synchronization.
+Position sizing, by contrast, proved most effective when handled mechanically. In Crane Sun's direct research and backtesting, the strongest results under the current 10x maximum leverage framework came from sizing exposure by comparing current volatility against the historical volatility distribution. That conclusion is automated here end to end: Gemini decides direction, while the runtime converts the current 24-hour volatility regime into a target margin ratio and effective leverage, then carries it through exchange-valid quantity planning, position rebalancing, and account-risk-based stop-loss synchronization.
 
 - Research-backed role split: the model is used for directional conviction, while sizing and execution remain deterministic and auditable.
 - 연구 기반 역할 분리: 모델은 방향성 확신 판단에만 쓰이고, 사이징과 실행은 결정론적이고 추적 가능한 로직으로 고정됩니다.
@@ -37,7 +37,7 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 | Market Scope | BTCUSDT only, intentionally narrowed for operational clarity and safer execution scope. |
 | Decision Engine | Gemini returns a structured `LONG` or `SHORT` decision from multi-timeframe market context. |
 | Scheduler | A persistent scheduler manages cycle cadence, state, hourly reporting, and graceful shutdown. |
-| Risk Controls | Fixed leverage, exchange-aware quantity adjustment, min-notional checks, and stop-loss synchronization. |
+| Risk Controls | Fixed leverage, exchange-aware quantity adjustment, min-notional checks, and account-risk-based stop-loss synchronization. |
 | Position Sizing | Volatility percentile sizing uses historical daily samples and a live 24-hour window to adapt exposure. |
 | Observability | Logs, JSON artifacts, state persistence, and optional Telegram notifications make each cycle reviewable. |
 
@@ -99,8 +99,8 @@ flowchart LR
 2. The runtime fetches current Binance Futures positions and a live reference price.
    현재 Binance Futures 포지션과 실시간 기준 가격을 조회합니다.
 
-3. If there is an existing position, the system first verifies and synchronizes stop-loss protection.
-   기존 포지션이 있으면 먼저 손절 보호 주문 상태를 점검하고 동기화합니다.
+3. If there is an existing position, the system first verifies and synchronizes stop-loss protection from the stored account-risk basis.
+   기존 포지션이 있으면 먼저 저장된 계좌 리스크 기준으로 손절 보호 주문 상태를 점검하고 동기화합니다.
 
 4. The trigger engine decides whether the latest price move is large enough to justify a fresh AI decision.
    트리거 엔진이 최근 가격 변동이 새로운 AI 판단을 요청할 만큼 충분한지 판정합니다.
@@ -120,8 +120,8 @@ flowchart LR
 9. Based on the AI direction and the current position state, the system may open, reverse, scale in, or scale out.
    AI 방향과 현재 포지션 상태에 따라 신규 진입, 반전, 증액, 축소가 실행될 수 있습니다.
 
-10. The runtime synchronizes stop-loss, persists cycle artifacts, sends optional notifications, and saves scheduler state.
-    실행 후 손절 상태를 다시 동기화하고, 사이클 산출물을 저장하며, 선택적으로 알림을 보내고, 최종 상태를 보존합니다.
+10. The runtime synchronizes stop-loss from the active account-risk basis, persists cycle artifacts, sends optional notifications, and saves scheduler state.
+    실행 후 활성 계좌 리스크 기준으로 손절 상태를 다시 동기화하고, 사이클 산출물을 저장하며, 선택적으로 알림을 보내고, 최종 상태를 보존합니다.
 
 ## Repository Structure | 저장소 구조
 
@@ -228,15 +228,15 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 | --- | --- | --- |
 | `symbol` | Trading symbol. The current runtime intentionally supports only `BTCUSDT`. | `BTCUSDT` |
 | `cycle_interval_seconds` | Main scheduler cycle interval. | `60` |
-| `trigger_pct_usdt` | Percent move from the last AI trigger price required to request a new AI decision. | `0.5` |
+| `trigger_pct_usdt` | Percent move from the last AI trigger price required to request a new AI decision. | `0.4` |
 | `ai_candle_count_per_timeframe` | Number of recent candles per timeframe sent to the AI model. | `24` |
 | `gemini_thinking_level` | Gemini reasoning level. Supported values: `minimal`, `low`, `medium`, `high`. | `high` |
 | `fixed_leverage` | Fixed leverage applied on entry and position sizing logic. | `10` |
-| `stop_loss_pct` | Relative stop-loss distance from entry price. | `0.01` |
+| `stop_loss_pct` | Account-level stop-loss risk ratio, converted into an entry-price stop distance from effective leverage. | `0.04` |
 | `position_sizing_daily_sample_days` | Number of daily candles used for volatility percentile sampling. | `100` |
 | `position_sizing_live_window_hours` | Number of recent 1-hour candles used to measure live volatility. | `24` |
-| `position_size_ratio_min` | Lower bound on the margin usage ratio. | `0.015` |
-| `position_size_ratio_max` | Upper bound on the margin usage ratio. | `0.995` |
+| `position_size_ratio_min` | Lower bound on the margin usage ratio. | `0.01` |
+| `position_size_ratio_max` | Upper bound on the margin usage ratio. | `0.99` |
 | `gemini_api_version` | Optional runtime config key with a default in code. | `v1beta` by default |
 
 ### How `setting.yaml` affects behavior | `setting.yaml`이 실제 동작에 미치는 영향
@@ -250,8 +250,8 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 - `fixed_leverage`, `position_size_ratio_min`, and `position_size_ratio_max` directly shape risk exposure.
 - `fixed_leverage`, `position_size_ratio_min`, `position_size_ratio_max`는 실제 위험 노출 수준에 직접 영향을 줍니다.
 
-- `stop_loss_pct` changes how tightly the system protects existing or newly created positions.
-- `stop_loss_pct`는 신규 및 기존 포지션에 적용되는 손절 보호 강도를 조절합니다.
+- `stop_loss_pct` defines the account-level risk budget used to derive the live stop-loss distance from position size and leverage.
+- `stop_loss_pct`는 포지션 비중과 레버리지로부터 실제 손절 거리를 계산할 때 쓰는 계좌 기준 리스크 예산입니다.
 
 - Volatility sizing fields determine how adaptive the system becomes under calm versus fast markets.
 - 변동성 사이징 관련 값들은 조용한 시장과 급변하는 시장에서 시스템이 얼마나 유연하게 대응하는지를 결정합니다.

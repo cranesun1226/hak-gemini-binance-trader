@@ -25,14 +25,14 @@ DEFAULT_GEMINI_THINKING_LEVEL = "high"
 DEFAULT_CONFIG: Dict[str, Any] = {
     "symbol": "BTCUSDT",
     "cycle_interval_seconds": 60,
-    "trigger_pct_usdt": 0.5,
+    "trigger_pct_usdt": 0.4,
     "fixed_leverage": 10,
-    "stop_loss_pct": 0.01,
+    "stop_loss_pct": 0.04,
     "ai_candle_count_per_timeframe": 24,
     "position_sizing_daily_sample_days": 100,
     "position_sizing_live_window_hours": 24,
-    "position_size_ratio_min": 0.015,
-    "position_size_ratio_max": 0.995,
+    "position_size_ratio_min": 0.01,
+    "position_size_ratio_max": 0.99,
     "gemini_api_version": DEFAULT_GEMINI_API_VERSION,
     "gemini_thinking_level": DEFAULT_GEMINI_THINKING_LEVEL,
 }

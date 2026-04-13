@@ -496,6 +496,10 @@ def calculate_position_metrics(position: Optional[Dict[str, Any]]) -> Dict[str, 
     if position_value is None and entry_price is not None and size is not None:
         position_value = abs(entry_price * size)
 
+    entry_notional = None
+    if entry_price is not None and size is not None:
+        entry_notional = abs(entry_price * size)
+
     position_margin = _first_valid_float(
         payload.get("positionMargin"),
         payload.get("isolatedMargin"),
@@ -511,6 +515,7 @@ def calculate_position_metrics(position: Optional[Dict[str, Any]]) -> Dict[str, 
         "direction": direction,
         "size": size,
         "entry_price": entry_price,
+        "entry_notional": entry_notional,
         "mark_price": mark_price,
         "leverage": leverage,
         "position_value": position_value,

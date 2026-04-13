@@ -53,6 +53,7 @@ _TRIGGER_PRICE_DIGITS = 2
 NotificationCallback = Optional[Callable[[str, Dict[str, Any]], None]]
 _DIRECTIONAL_AI_DECISIONS = {"LONG", "SHORT"}
 _VALID_AI_DECISIONS = set(_DIRECTIONAL_AI_DECISIONS)
+_STATE_UNSET = object()
 
 # Configuration and normalization helpers.
 
@@ -79,6 +80,15 @@ def _normalize_ratio(value: Any, default: float) -> float:
     parsed = _safe_float(value, default)
     if parsed is None or not math.isfinite(parsed) or parsed <= 0.0:
         parsed = default
+    if 1.0 < parsed <= 100.0:
+        parsed /= 100.0
+    return float(parsed)
+
+
+def _normalize_optional_ratio(value: Any) -> Optional[float]:
+    parsed = _safe_float(value, None)
+    if parsed is None or not math.isfinite(parsed) or parsed <= 0.0:
+        return None
     if 1.0 < parsed <= 100.0:
         parsed /= 100.0
     return float(parsed)
@@ -135,23 +145,23 @@ def _load_strategy_config() -> Dict[str, Any]:
         logger.warning("Forcing symbol=%s to BTCUSDT-only runtime", symbol)
         symbol = DEFAULT_SYMBOL
 
-    position_size_ratio_min = _normalize_ratio(raw.get("position_size_ratio_min", 0.015), 0.015)
-    position_size_ratio_max = _normalize_ratio(raw.get("position_size_ratio_max", 0.995), 0.995)
+    position_size_ratio_min = _normalize_ratio(raw.get("position_size_ratio_min", 0.01), 0.01)
+    position_size_ratio_max = _normalize_ratio(raw.get("position_size_ratio_max", 0.99), 0.99)
     if position_size_ratio_max <= position_size_ratio_min:
         logger.warning(
             "Invalid position size ratio bounds min=%s max=%s; using defaults",
             raw.get("position_size_ratio_min"),
             raw.get("position_size_ratio_max"),
         )
-        position_size_ratio_min = 0.015
-        position_size_ratio_max = 0.995
+        position_size_ratio_min = 0.01
+        position_size_ratio_max = 0.99
 
     return {
         "symbol": symbol,
         "cycle_interval_seconds": _normalize_positive_int(raw.get("cycle_interval_seconds", 60), 60),
-        "trigger_pct_usdt": _normalize_trigger_percent(raw.get("trigger_pct_usdt", 0.5), 0.5),
+        "trigger_pct_usdt": _normalize_trigger_percent(raw.get("trigger_pct_usdt", 0.4), 0.4),
         "fixed_leverage": _normalize_positive_int(raw.get("fixed_leverage", 10), 10),
-        "stop_loss_pct": _normalize_ratio(raw.get("stop_loss_pct", 0.01), 0.01),
+        "stop_loss_pct": _normalize_ratio(raw.get("stop_loss_pct", 0.04), 0.04),
         "ai_candle_count_per_timeframe": _normalize_positive_int(raw.get("ai_candle_count_per_timeframe", 24), 24),
         "position_sizing_daily_sample_days": _normalize_positive_int(
             raw.get("position_sizing_daily_sample_days", 100),
@@ -342,9 +352,12 @@ def _position_summary_for_log(position: Optional[Dict[str, Any]]) -> Dict[str, A
         "direction": payload.get("direction"),
         "size": payload.get("size"),
         "entry_price": payload.get("entry_price"),
+        "entry_notional": payload.get("entry_notional"),
         "position_value": payload.get("position_value"),
         "position_margin": payload.get("position_margin"),
         "stop_loss": payload.get("stop_loss"),
+        "stop_loss_distance_pct": payload.get("stop_loss_distance_pct"),
+        "stop_loss_basis_effective_leverage": payload.get("stop_loss_basis_effective_leverage"),
     }
 
 
@@ -802,62 +815,240 @@ def _build_min_notional_skip_result(
     return result
 
 
-def _resolve_entry_stop_loss_price(
+def _floats_close(
+    left: Optional[float],
+    right: Optional[float],
+    *,
+    rel_tol: float = 1e-6,
+    abs_tol: float = 1e-9,
+) -> bool:
+    if left is None or right is None:
+        return False
+    return math.isclose(float(left), float(right), rel_tol=rel_tol, abs_tol=abs_tol)
+
+
+def _resolve_position_stop_loss_price(
     *,
     direction: str,
     entry_price: float,
-    stop_loss_pct: float,
+    stop_distance_pct: float,
 ) -> Optional[float]:
-    if entry_price <= 0.0:
+    if entry_price <= 0.0 or stop_distance_pct <= 0.0 or not math.isfinite(stop_distance_pct):
         return None
     normalized_direction = str(direction or "").strip().lower()
     if normalized_direction == "long":
-        return float(entry_price * (1.0 - stop_loss_pct))
+        return float(entry_price * (1.0 - stop_distance_pct))
     if normalized_direction == "short":
-        return float(entry_price * (1.0 + stop_loss_pct))
+        return float(entry_price * (1.0 + stop_distance_pct))
     return None
 
 
-def _sync_entry_price_stop_loss(
+def _normalize_stop_risk_basis(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+
+    direction = str(value.get("direction") or "").strip().lower()
+    if direction not in {"long", "short"}:
+        return None
+
+    entry_price = _format_price(value.get("entry_price"))
+    size = _format_price(value.get("size"))
+    basis_account_equity = _format_price(value.get("basis_account_equity"))
+    basis_entry_notional = _format_price(value.get("basis_entry_notional") or value.get("entry_notional"))
+    stop_loss_account_risk_pct = _normalize_optional_ratio(
+        value.get("stop_loss_account_risk_pct") or value.get("account_risk_pct")
+    )
+    basis_effective_leverage = _safe_float(value.get("basis_effective_leverage"), None)
+    stop_loss_distance_pct = _normalize_optional_ratio(
+        value.get("stop_loss_distance_pct") or value.get("stop_distance_pct")
+    )
+    stop_loss = _format_price(value.get("stop_loss"))
+
+    if entry_price is None or size is None or basis_account_equity is None:
+        return None
+    if basis_entry_notional is None:
+        basis_entry_notional = float(entry_price * size)
+    if basis_effective_leverage is None and basis_account_equity > 0.0 and basis_entry_notional > 0.0:
+        basis_effective_leverage = float(basis_entry_notional / basis_account_equity)
+    if (
+        basis_effective_leverage is None
+        or not math.isfinite(basis_effective_leverage)
+        or basis_effective_leverage <= 0.0
+    ):
+        return None
+    if stop_loss_account_risk_pct is None:
+        return None
+    if stop_loss_distance_pct is None:
+        stop_loss_distance_pct = float(stop_loss_account_risk_pct / basis_effective_leverage)
+    if stop_loss_distance_pct <= 0.0 or not math.isfinite(stop_loss_distance_pct):
+        return None
+    if stop_loss is None:
+        stop_loss = _resolve_position_stop_loss_price(
+            direction=direction,
+            entry_price=entry_price,
+            stop_distance_pct=stop_loss_distance_pct,
+        )
+    if stop_loss is None:
+        return None
+
+    return {
+        "direction": direction,
+        "size": float(size),
+        "entry_price": float(entry_price),
+        "basis_account_equity": float(basis_account_equity),
+        "basis_entry_notional": float(basis_entry_notional),
+        "basis_effective_leverage": float(basis_effective_leverage),
+        "stop_loss_account_risk_pct": float(stop_loss_account_risk_pct),
+        "stop_loss_distance_pct": float(stop_loss_distance_pct),
+        "stop_loss": float(stop_loss),
+        "updated_at": str(value.get("updated_at") or _current_time_utc().isoformat()),
+    }
+
+
+def _build_stop_risk_basis_from_position(
+    *,
+    position: Dict[str, Any],
+    account_equity: float,
+    stop_loss_account_risk_pct: float,
+) -> Optional[Dict[str, Any]]:
+    metrics = calculate_position_metrics(position)
+    direction = str(metrics.get("direction") or "").strip().lower()
+    entry_price = _format_price(metrics.get("entry_price"))
+    size = _format_price(metrics.get("size"))
+    basis_entry_notional = _format_price(metrics.get("entry_notional"))
+    basis_account_equity = _format_price(account_equity)
+    normalized_risk_pct = _normalize_optional_ratio(stop_loss_account_risk_pct)
+    if (
+        direction not in {"long", "short"}
+        or entry_price is None
+        or size is None
+        or basis_entry_notional is None
+        or basis_account_equity is None
+        or normalized_risk_pct is None
+    ):
+        return None
+
+    basis_effective_leverage = float(basis_entry_notional / basis_account_equity)
+    if basis_effective_leverage <= 0.0 or not math.isfinite(basis_effective_leverage):
+        return None
+
+    stop_loss_distance_pct = float(normalized_risk_pct / basis_effective_leverage)
+    stop_loss = _resolve_position_stop_loss_price(
+        direction=direction,
+        entry_price=entry_price,
+        stop_distance_pct=stop_loss_distance_pct,
+    )
+    if stop_loss is None:
+        return None
+
+    return {
+        "direction": direction,
+        "size": float(size),
+        "entry_price": float(entry_price),
+        "basis_account_equity": float(basis_account_equity),
+        "basis_entry_notional": float(basis_entry_notional),
+        "basis_effective_leverage": float(basis_effective_leverage),
+        "stop_loss_account_risk_pct": float(normalized_risk_pct),
+        "stop_loss_distance_pct": float(stop_loss_distance_pct),
+        "stop_loss": float(stop_loss),
+        "updated_at": _current_time_utc().isoformat(),
+    }
+
+
+def _stop_risk_basis_matches_position(stop_risk_basis: Any, position: Optional[Dict[str, Any]]) -> bool:
+    normalized_basis = _normalize_stop_risk_basis(stop_risk_basis)
+    if normalized_basis is None or not isinstance(position, dict):
+        return False
+
+    metrics = calculate_position_metrics(position)
+    direction = str(metrics.get("direction") or "").strip().lower()
+    entry_price = _format_price(metrics.get("entry_price"))
+    size = _format_price(metrics.get("size"))
+    entry_notional = _format_price(metrics.get("entry_notional"))
+    return (
+        direction == normalized_basis["direction"]
+        and _floats_close(entry_price, normalized_basis["entry_price"])
+        and _floats_close(size, normalized_basis["size"])
+        and _floats_close(entry_notional, normalized_basis["basis_entry_notional"], rel_tol=1e-5, abs_tol=1e-6)
+    )
+
+
+def _enrich_position_with_stop_risk(
+    position: Optional[Dict[str, Any]],
+    stop_risk_basis: Any,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(position, dict):
+        return position
+
+    normalized_basis = _normalize_stop_risk_basis(stop_risk_basis)
+    if normalized_basis is None:
+        return dict(position)
+
+    updated_position = dict(position)
+    updated_position["entry_notional"] = (
+        updated_position.get("entry_notional") or normalized_basis["basis_entry_notional"]
+    )
+    updated_position["stop_loss_account_risk_pct"] = normalized_basis["stop_loss_account_risk_pct"]
+    updated_position["stop_loss_distance_pct"] = normalized_basis["stop_loss_distance_pct"]
+    updated_position["stop_loss_basis_account_equity"] = normalized_basis["basis_account_equity"]
+    updated_position["stop_loss_basis_entry_notional"] = normalized_basis["basis_entry_notional"]
+    updated_position["stop_loss_basis_effective_leverage"] = normalized_basis["basis_effective_leverage"]
+    return updated_position
+
+
+def _sync_account_risk_stop_loss(
     *,
     api_key: str,
     api_secret: str,
     symbol: str,
     position: Dict[str, Any],
-    stop_loss_pct: float,
+    stop_risk_basis: Any,
 ) -> Dict[str, Any]:
     metrics = calculate_position_metrics(position)
-    entry_price = _format_price(metrics.get("entry_price"))
     direction = str(metrics.get("direction") or "").strip().lower()
     side = str(metrics.get("side") or "").strip()
     current_stop = _format_price(metrics.get("stop_loss"))
-    if entry_price is None or direction not in ("long", "short") or not side:
+    normalized_basis = _normalize_stop_risk_basis(stop_risk_basis)
+    if direction not in ("long", "short") or not side:
         return {
             "success": False,
             "changed": False,
             "reason": "invalid_position_for_stop_sync",
         }
-
-    desired_stop = _resolve_entry_stop_loss_price(
-        direction=direction,
-        entry_price=entry_price,
-        stop_loss_pct=stop_loss_pct,
-    )
-    if desired_stop is None:
+    if normalized_basis is None:
         return {
             "success": False,
             "changed": False,
-            "reason": "invalid_desired_stop",
+            "reason": "stop_risk_basis_unavailable",
+        }
+    if normalized_basis["direction"] != direction:
+        return {
+            "success": False,
+            "changed": False,
+            "reason": "stop_risk_basis_mismatch",
+            "stop_loss_account_risk_pct": normalized_basis["stop_loss_account_risk_pct"],
+            "stop_loss_distance_pct": normalized_basis["stop_loss_distance_pct"],
+            "basis_account_equity": normalized_basis["basis_account_equity"],
+            "basis_entry_notional": normalized_basis["basis_entry_notional"],
+            "basis_effective_leverage": normalized_basis["basis_effective_leverage"],
         }
 
-    return sync_existing_position_stop_loss(
+    sync_result = sync_existing_position_stop_loss(
         api_key,
         api_secret,
         symbol,
         side,
-        stop_loss=desired_stop,
+        stop_loss=normalized_basis["stop_loss"],
         current_stop_loss=current_stop,
     )
+    enriched_result = dict(sync_result)
+    enriched_result.setdefault("stop_loss", normalized_basis["stop_loss"])
+    enriched_result["stop_loss_account_risk_pct"] = normalized_basis["stop_loss_account_risk_pct"]
+    enriched_result["stop_loss_distance_pct"] = normalized_basis["stop_loss_distance_pct"]
+    enriched_result["basis_account_equity"] = normalized_basis["basis_account_equity"]
+    enriched_result["basis_entry_notional"] = normalized_basis["basis_entry_notional"]
+    enriched_result["basis_effective_leverage"] = normalized_basis["basis_effective_leverage"]
+    return enriched_result
 
 
 def _fetch_synced_position(
@@ -961,6 +1152,7 @@ def _build_state_update(
     ai_decision: Optional[str],
     next_trigger_down: Optional[float],
     next_trigger_up: Optional[float],
+    stop_risk_basis: Any = _STATE_UNSET,
 ) -> Dict[str, Any]:
     state_update = dict(previous_state or {})
     state_update.pop("last_ai_trigger_round_price", None)
@@ -975,6 +1167,11 @@ def _build_state_update(
         state_update["next_trigger_down"] = next_trigger_down
     if next_trigger_up is not None:
         state_update["next_trigger_up"] = next_trigger_up
+    if stop_risk_basis is not _STATE_UNSET:
+        normalized_stop_risk_basis = _normalize_stop_risk_basis(stop_risk_basis)
+        state_update["stop_risk_basis"] = (
+            dict(normalized_stop_risk_basis) if normalized_stop_risk_basis is not None else None
+        )
     return state_update
 
 
@@ -984,6 +1181,7 @@ def _build_ai_state_update_from_reference_price(
     trigger_pct_usdt: float,
     reference_price: float,
     ai_decision: Optional[str],
+    stop_risk_basis: Any = _STATE_UNSET,
 ) -> Dict[str, Any]:
     next_levels = _build_trigger_levels(reference_price, trigger_pct_usdt)
     return _build_state_update(
@@ -994,6 +1192,7 @@ def _build_ai_state_update_from_reference_price(
         ai_decision=ai_decision,
         next_trigger_down=next_levels["next_trigger_down"],
         next_trigger_up=next_levels["next_trigger_up"],
+        stop_risk_basis=stop_risk_basis,
     )
 
 
@@ -1396,18 +1595,29 @@ def run_hakai_cycle(
     symbol = str(config["symbol"])
     leverage = int(config["fixed_leverage"])
     trigger_pct_usdt = float(config["trigger_pct_usdt"])
+    stop_loss_account_risk_pct = float(config["stop_loss_pct"])
     resolved_as_of_ms = _safe_int(as_of_ms, 0) or _current_time_ms()
     raw_previous_state = dict(state or {})
     previous_state, trigger_pct_state_refreshed = _align_state_trigger_percent(
         raw_previous_state,
         trigger_pct_usdt,
     )
+    state_stop_risk_basis = _normalize_stop_risk_basis(previous_state.get("stop_risk_basis"))
 
     result: Dict[str, Any] = {
         "success": False,
         "symbol": symbol,
         "action": "init",
-        "state_update": dict(previous_state),
+        "state_update": _build_state_update(
+            previous_state=previous_state,
+            trigger_pct_usdt=trigger_pct_usdt,
+            ai_triggered=False,
+            trigger_price=None,
+            ai_decision=None,
+            next_trigger_down=None,
+            next_trigger_up=None,
+            stop_risk_basis=state_stop_risk_basis,
+        ),
         "ai_triggered": False,
         "ai_decision": None,
         "current_price": None,
@@ -1419,6 +1629,7 @@ def run_hakai_cycle(
         "position": None,
         "position_before": None,
         "volatility_snapshot": None,
+        "stop_risk_basis": dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None,
     }
     logger.debug(
         "HAK GEMINI BINANCE TRADER cycle started | %s",
@@ -1475,6 +1686,15 @@ def run_hakai_cycle(
         current_position_metrics = calculate_position_metrics(current_position)
         result["position"] = dict(current_position_metrics)
         result["position_before"] = dict(current_position_metrics)
+        if not _stop_risk_basis_matches_position(state_stop_risk_basis, current_position):
+            state_stop_risk_basis = None
+            result["stop_risk_basis"] = None
+        else:
+            result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
+            result["position_before"] = _enrich_position_with_stop_risk(result.get("position_before"), state_stop_risk_basis)
+    else:
+        state_stop_risk_basis = None
+        result["stop_risk_basis"] = None
     logger.debug(
         "Current managed position snapshot | %s",
         format_log_details(
@@ -1495,25 +1715,49 @@ def run_hakai_cycle(
     result["current_price"] = reference_price
 
     stop_sync_result: Optional[Dict[str, Any]] = None
+    prefetched_account_equity: Optional[float] = None
     if has_position and current_position is not None:
-        stop_sync_result = _sync_entry_price_stop_loss(
-            api_key=api_key,
-            api_secret=api_secret,
-            symbol=symbol,
-            position=current_position,
-            stop_loss_pct=float(config["stop_loss_pct"]),
-        )
-        result["stop_sync"] = stop_sync_result
-        result["position"] = _apply_synced_stop_loss_to_position(result.get("position"), stop_sync_result)
-        logger.debug(
-            "Pre-AI stop sync completed | %s",
-            format_log_details(
-                {
-                    "symbol": symbol,
-                    "stop_sync": stop_sync_result,
-                }
-            ),
-        )
+        if state_stop_risk_basis is None:
+            prefetched_account_equity = _format_price(get_account_equity(api_key, api_secret))
+            if prefetched_account_equity is not None:
+                state_stop_risk_basis = _build_stop_risk_basis_from_position(
+                    position=current_position,
+                    account_equity=prefetched_account_equity,
+                    stop_loss_account_risk_pct=stop_loss_account_risk_pct,
+                )
+                result["stop_risk_basis"] = (
+                    dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None
+                )
+            else:
+                logger.warning(
+                    "Account equity unavailable for stop risk basis refresh | %s",
+                    format_log_details({"symbol": symbol}),
+                )
+        if state_stop_risk_basis is not None:
+            result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
+            result["position_before"] = _enrich_position_with_stop_risk(
+                result.get("position_before"),
+                state_stop_risk_basis,
+            )
+            stop_sync_result = _sync_account_risk_stop_loss(
+                api_key=api_key,
+                api_secret=api_secret,
+                symbol=symbol,
+                position=current_position,
+                stop_risk_basis=state_stop_risk_basis,
+            )
+            result["stop_sync"] = stop_sync_result
+            result["position"] = _apply_synced_stop_loss_to_position(result.get("position"), stop_sync_result)
+            result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
+            logger.debug(
+                "Pre-AI stop sync completed | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "stop_sync": stop_sync_result,
+                    }
+                ),
+            )
 
     trigger_info = _determine_ai_trigger(
         has_position=has_position,
@@ -1555,6 +1799,7 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            stop_risk_basis=state_stop_risk_basis,
         )
         logger.debug(
             "HAK GEMINI BINANCE TRADER cycle completed without AI trigger | %s",
@@ -1672,6 +1917,7 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            stop_risk_basis=state_stop_risk_basis,
         )
         _emit_notification(
             notification_callback,
@@ -1736,7 +1982,9 @@ def run_hakai_cycle(
         },
     )
 
-    account_equity = _format_price(get_account_equity(api_key, api_secret))
+    account_equity = prefetched_account_equity
+    if account_equity is None:
+        account_equity = _format_price(get_account_equity(api_key, api_secret))
     if account_equity is None:
         result["action"] = "account_equity_unavailable"
         result["state_update"] = _build_state_update(
@@ -1747,6 +1995,7 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
         return result
@@ -1783,6 +2032,7 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
         return result
@@ -1842,6 +2092,7 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
         logger.error(
@@ -1866,16 +2117,23 @@ def run_hakai_cycle(
         expected_action=execution_action,
     )
     if synced_position is not None:
-        synced_stop_result = _sync_entry_price_stop_loss(
+        state_stop_risk_basis = _build_stop_risk_basis_from_position(
+            position=synced_position,
+            account_equity=account_equity,
+            stop_loss_account_risk_pct=stop_loss_account_risk_pct,
+        )
+        result["stop_risk_basis"] = dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None
+        synced_stop_result = _sync_account_risk_stop_loss(
             api_key=api_key,
             api_secret=api_secret,
             symbol=symbol,
             position=synced_position,
-            stop_loss_pct=float(config["stop_loss_pct"]),
+            stop_risk_basis=state_stop_risk_basis,
         )
         result["post_trade_stop_sync"] = synced_stop_result
         result["position"] = calculate_position_metrics(synced_position)
         result["position"] = _apply_synced_stop_loss_to_position(result.get("position"), synced_stop_result)
+        result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
         logger.info(
             "Post-trade position synchronized | %s",
             format_log_details(
@@ -1886,6 +2144,9 @@ def run_hakai_cycle(
                 }
             ),
         )
+    else:
+        state_stop_risk_basis = None
+        result["stop_risk_basis"] = None
 
     result["success"] = True
     result["action"] = execution_action
@@ -1897,6 +2158,7 @@ def run_hakai_cycle(
         ai_decision=ai_decision.decision,
         next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
         next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+        stop_risk_basis=state_stop_risk_basis,
     )
 
     _persist_cycle_output(result)
@@ -1931,8 +2193,10 @@ def run_hourly_volatility_resize(
     symbol = str(config["symbol"])
     leverage = int(config["fixed_leverage"])
     trigger_pct_usdt = float(config["trigger_pct_usdt"])
+    stop_loss_account_risk_pct = float(config["stop_loss_pct"])
     resolved_as_of_ms = _safe_int(as_of_ms, 0) or _current_time_ms()
     previous_state = dict(state or {})
+    state_stop_risk_basis = _normalize_stop_risk_basis(previous_state.get("stop_risk_basis"))
 
     result: Dict[str, Any] = {
         "success": False,
@@ -1952,7 +2216,17 @@ def run_hourly_volatility_resize(
         "account_equity": None,
         "target_notional_usdt": None,
         "execution": None,
-        "state_update": None,
+        "state_update": _build_state_update(
+            previous_state=previous_state,
+            trigger_pct_usdt=trigger_pct_usdt,
+            ai_triggered=False,
+            trigger_price=None,
+            ai_decision=None,
+            next_trigger_down=None,
+            next_trigger_up=None,
+            stop_risk_basis=state_stop_risk_basis,
+        ),
+        "stop_risk_basis": dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None,
     }
     logger.info(
         "Hourly volatility resize started | %s",
@@ -1989,6 +2263,18 @@ def run_hourly_volatility_resize(
         current_position_metrics = calculate_position_metrics(current_position)
         result["position_before"] = dict(current_position_metrics)
         result["position"] = dict(current_position_metrics)
+        if not _stop_risk_basis_matches_position(state_stop_risk_basis, current_position):
+            state_stop_risk_basis = None
+            result["stop_risk_basis"] = None
+        else:
+            result["position_before"] = _enrich_position_with_stop_risk(
+                result.get("position_before"),
+                state_stop_risk_basis,
+            )
+            result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
+    else:
+        state_stop_risk_basis = None
+        result["stop_risk_basis"] = None
 
     reference_price_payload = get_reference_price(symbol)
     reference_price = _format_price((reference_price_payload or {}).get("price"))
@@ -2094,6 +2380,7 @@ def run_hourly_volatility_resize(
         trigger_pct_usdt=trigger_pct_usdt,
         reference_price=reference_price,
         ai_decision=ai_decision.decision,
+        stop_risk_basis=state_stop_risk_basis,
     )
     result["ai_triggered"] = True
     result["ai_decision"] = ai_decision.decision
@@ -2210,15 +2497,32 @@ def run_hourly_volatility_resize(
         )
         result["position"] = calculate_position_metrics(synced_position) if synced_position is not None else None
         if synced_position is not None:
-            synced_stop_result = _sync_entry_price_stop_loss(
+            state_stop_risk_basis = _build_stop_risk_basis_from_position(
+                position=synced_position,
+                account_equity=account_equity,
+                stop_loss_account_risk_pct=stop_loss_account_risk_pct,
+            )
+            result["stop_risk_basis"] = dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None
+            synced_stop_result = _sync_account_risk_stop_loss(
                 api_key=api_key,
                 api_secret=api_secret,
                 symbol=symbol,
                 position=synced_position,
-                stop_loss_pct=float(config["stop_loss_pct"]),
+                stop_risk_basis=state_stop_risk_basis,
             )
             result["post_trade_stop_sync"] = synced_stop_result
             result["position"] = _apply_synced_stop_loss_to_position(result.get("position"), synced_stop_result)
+            result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
+        else:
+            state_stop_risk_basis = None
+            result["stop_risk_basis"] = None
+    result["state_update"] = _build_ai_state_update_from_reference_price(
+        previous_state=previous_state,
+        trigger_pct_usdt=trigger_pct_usdt,
+        reference_price=reference_price,
+        ai_decision=ai_decision.decision,
+        stop_risk_basis=state_stop_risk_basis,
+    )
     _persist_cycle_output(result)
     logger.info(
         "Hourly volatility resize completed | %s",

@@ -14,9 +14,9 @@ symbol: BTCUSDT
 # Sets how many seconds to wait between each strategy execution cycle.
 cycle_interval_seconds: 60
 
-# 마지막 트리거 기준가에서 몇 % 움직이면 AI 판단을 다시 요청할지 설정하며 0.5는 0.5%를 뜻합니다.
-# Sets the percent move from the last trigger price needed to request a new AI decision; 0.5 means 0.5%.
-trigger_pct_usdt: 0.5
+# 마지막 트리거 기준가에서 몇 % 움직이면 AI 판단을 다시 요청할지 설정하며 0.4는 0.4%를 뜻합니다.
+# Sets the percent move from the last trigger price needed to request a new AI decision; 0.4 means 0.4%.
+trigger_pct_usdt: 0.4
 
 # ================================================================================
 # AI 입력 및 추론 설정
@@ -38,9 +38,9 @@ gemini_thinking_level: high
 # Fixed leverage multiplier applied when opening a position.
 fixed_leverage: 10
 
-# 진입가 대비 손절 비율이며 0.01은 1% 손절을 의미합니다. 레버리지를 적용하면, 10배 기준 10% 손절입니다.
-# Stop-loss ratio relative to entry price; 0.01 means a 1% stop loss. When leverage is applied, the stop-loss is set at 10% based on a 10x leverage ratio.
-stop_loss_pct: 0.01
+# 전체 계좌 기준 손절 리스크 비율이며, 0.04는 계좌 기준 4% 손실을 뜻하고 현재 포지션의 실질 레버리지에 맞춰 평단가 기준 손절 거리로 자동 변환됩니다.
+# Account-level stop-loss risk ratio; 0.04 means a 4% account risk budget and is converted into an entry-price stop distance using the position's effective leverage.
+stop_loss_pct: 0.04
 
 # ================================================================================
 # 변동성 기반 포지션 사이징
@@ -56,8 +56,8 @@ position_sizing_live_window_hours: 24
 
 # 변동성이 낮아도 최소 이 비율만큼 증거금을 사용하도록 하한선을 둡니다.
 # Lower bound on margin usage so sizing does not fall below this ratio even in low volatility.
-position_size_ratio_min: 0.015
+position_size_ratio_min: 0.01
 
 # 변동성이 높아도 최대 이 비율까지만 증거금을 사용하도록 상한선을 둡니다.
 # Upper bound on margin usage so sizing does not exceed this ratio even in high volatility.
-position_size_ratio_max: 0.995
+position_size_ratio_max: 0.99

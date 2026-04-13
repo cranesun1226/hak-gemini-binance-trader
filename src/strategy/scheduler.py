@@ -68,7 +68,10 @@ ACTION_LABELS = {
 STOP_SYNC_REASON_LABELS = {
     "stop_loss_already_synced": "Existing stop kept",
     "invalid_symbol_or_side": "Invalid symbol or side",
+    "invalid_position_for_stop_sync": "Invalid position snapshot",
     "invalid_stop_loss": "Failed to calculate stop price",
+    "stop_risk_basis_unavailable": "Missing stop-risk basis",
+    "stop_risk_basis_mismatch": "Stop-risk basis mismatch",
     "place_stop_loss_failed": "Failed to place stop-loss order",
 }
 
@@ -138,6 +141,7 @@ class TradingScheduler:
             "last_ai_decision": None,
             "next_trigger_down": None,
             "next_trigger_up": None,
+            "stop_risk_basis": None,
             "last_cycle_result": None,
             "last_hourly_report_slot": None,
             "last_hourly_resize_slot": None,
@@ -407,18 +411,30 @@ class TradingScheduler:
         if not isinstance(stop_sync, dict):
             return "No details"
 
+        reason = self._translate_stop_sync_reason(stop_sync.get("reason"))
         if bool(stop_sync.get("success")):
             stop_price = self._format_float(stop_sync.get("stop_loss"))
-            reason = self._translate_stop_sync_reason(stop_sync.get("reason"))
-            if reason and reason != "None":
-                return f"{reason} / Stop {stop_price}"
-            return f"Synced / Stop {stop_price}"
+            segments = [reason if reason and reason != "None" else "Synced", f"Stop {stop_price}"]
+            risk_pct = self._format_pct(stop_sync.get("stop_loss_account_risk_pct"))
+            if risk_pct != "-":
+                segments.append(f"Risk {risk_pct}")
+            distance_pct = self._format_pct(stop_sync.get("stop_loss_distance_pct"))
+            if distance_pct != "-":
+                segments.append(f"Dist {distance_pct}")
+            basis_leverage = self._format_float(stop_sync.get("basis_effective_leverage"))
+            if basis_leverage != "-":
+                segments.append(f"Basis {basis_leverage}x")
+            return " / ".join(segments)
 
         error_code = stop_sync.get("error_code")
         error_message = self._clip_text(stop_sync.get("error_message"), limit=140)
         if error_code not in (None, ""):
             return f"Failed / code {error_code} / {error_message}"
-        return f"Failed / {error_message}"
+        if error_message != "-":
+            return f"Failed / {error_message}"
+        if reason and reason != "None":
+            return f"Failed / {reason}"
+        return "Failed"
 
     def _format_hourly_resize_summary(self, resize: Any) -> str:
         if not isinstance(resize, dict):
