@@ -21,6 +21,10 @@ CONFIG_PATH = os.path.join(ROOT_DIR, "setting.yaml")
 # Runtime defaults live here so optional keys can be omitted from setting.yaml.
 DEFAULT_GEMINI_API_VERSION = "v1beta"
 DEFAULT_GEMINI_THINKING_LEVEL = "high"
+DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS = 25
+DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS = 24
+DEFAULT_POSITION_SIZE_RATIO_MIN = 0.02
+DEFAULT_POSITION_SIZE_RATIO_MAX = 0.98
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "symbol": "BTCUSDT",
@@ -29,10 +33,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "fixed_leverage": 10,
     "stop_loss_pct": 0.04,
     "ai_candle_count_per_timeframe": 24,
-    "position_sizing_daily_sample_days": 100,
-    "position_sizing_live_window_hours": 24,
-    "position_size_ratio_min": 0.01,
-    "position_size_ratio_max": 0.99,
+    "position_sizing_daily_sample_days": DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
+    "position_sizing_live_window_hours": DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
+    "position_size_ratio_min": DEFAULT_POSITION_SIZE_RATIO_MIN,
+    "position_size_ratio_max": DEFAULT_POSITION_SIZE_RATIO_MAX,
     "gemini_api_version": DEFAULT_GEMINI_API_VERSION,
     "gemini_thinking_level": DEFAULT_GEMINI_THINKING_LEVEL,
 }

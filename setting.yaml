@@ -46,18 +46,18 @@ stop_loss_pct: 0.04
 # 변동성 기반 포지션 사이징
 # Volatility-Based Position Sizing
 # ================================================================================
-# 일봉 변동성 백분위 계산에 사용할 과거 일봉 샘플 개수입니다.
-# Number of historical daily candles used for volatility percentile calculations.
-position_sizing_daily_sample_days: 100
+# 일봉 변동성 랭크 계산에 사용할 과거 일봉 샘플 개수입니다.
+# Number of historical daily candles used for daily volatility rank calculations.
+position_sizing_daily_sample_days: 25
 
 # 현재 변동성 계산에 사용할 최근 1시간봉 구간 길이입니다.
 # Length of the recent 1-hour candle window used to measure current volatility.
 position_sizing_live_window_hours: 24
 
-# 변동성이 낮아도 최소 이 비율만큼 증거금을 사용하도록 하한선을 둡니다.
-# Lower bound on margin usage so sizing does not fall below this ratio even in low volatility.
-position_size_ratio_min: 0.01
+# 25일 샘플 기준 rank 1은 2% 증거금 사용 비율에 대응합니다.
+# With the 25-day sample, rank 1 maps to a 2% margin usage ratio.
+position_size_ratio_min: 0.02
 
-# 변동성이 높아도 최대 이 비율까지만 증거금을 사용하도록 상한선을 둡니다.
-# Upper bound on margin usage so sizing does not exceed this ratio even in high volatility.
-position_size_ratio_max: 0.99
+# 25일 샘플 기준 rank 25는 98% 증거금 사용 비율에 대응합니다.
+# With the 25-day sample, rank 25 maps to a 98% margin usage ratio.
+position_size_ratio_max: 0.98

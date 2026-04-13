@@ -38,7 +38,7 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 | Decision Engine | Gemini returns a structured `LONG` or `SHORT` decision from multi-timeframe market context. |
 | Scheduler | A persistent scheduler manages cycle cadence, state, hourly reporting, and graceful shutdown. |
 | Risk Controls | Fixed leverage, exchange-aware quantity adjustment, min-notional checks, and account-risk-based stop-loss synchronization. |
-| Position Sizing | Volatility percentile sizing uses historical daily samples and a live 24-hour window to adapt exposure. |
+| Position Sizing | Volatility rank sizing uses the most recent 25 closed daily samples and a live 24-hour window to adapt exposure. |
 | Observability | Logs, JSON artifacts, state persistence, and optional Telegram notifications make each cycle reviewable. |
 
 ## Why This Project Stands Out | 이 프로젝트의 강점
@@ -52,8 +52,8 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 - Exchange-aware execution: position sizing and order submission respect Binance Futures constraints such as lot size, tick size, leverage, min notional, reduce-only close logic, and transient API retry handling.
 - 거래소 제약을 반영한 실행: 포지션 크기 계산과 주문 실행은 Binance Futures의 수량 단위, 가격 틱, 레버리지, 최소 주문 금액, reduce-only 청산 로직, 일시적 API 장애 재시도까지 고려합니다.
 
-- Volatility-aware resizing: the system does not use a static all-in sizing rule. It computes a target margin ratio from historical daily volatility and the current 24-hour volatility regime, then rebalances when appropriate.
-- 변동성 적응형 사이징: 고정 비중 진입이 아니라, 과거 일봉 변동성과 현재 24시간 변동성 구간을 바탕으로 목표 증거금 비율을 계산하고 필요 시 포지션을 재조정합니다.
+- Volatility-aware resizing: the system does not use a static all-in sizing rule. It ranks the current 24-hour volatility regime against the most recent 25 closed daily candles, then maps that rank to a target margin ratio between 2% and 98%.
+- 변동성 적응형 사이징: 고정 비중 진입이 아니라, 최근 종료된 25개 일봉 대비 현재 24시간 변동성의 랭크를 계산한 뒤 이를 2%에서 98% 사이 목표 증거금 비율로 매핑해 필요 시 포지션을 재조정합니다.
 
 - Auditability by design: every AI-triggered cycle can leave behind structured artifacts such as prompt input, AI output, and final cycle output, making the system explainable to reviewers and maintainers.
 - 설계 차원의 추적 가능성: AI가 개입한 각 사이클은 프롬프트 입력, AI 출력, 최종 실행 결과를 JSON으로 남길 수 있어, 리뷰어와 유지보수자가 흐름을 추적하고 설명하기 쉽습니다.
@@ -233,10 +233,10 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 | `gemini_thinking_level` | Gemini reasoning level. Supported values: `minimal`, `low`, `medium`, `high`. | `high` |
 | `fixed_leverage` | Fixed leverage applied on entry and position sizing logic. | `10` |
 | `stop_loss_pct` | Account-level stop-loss risk ratio, converted into an entry-price stop distance from effective leverage. | `0.04` |
-| `position_sizing_daily_sample_days` | Number of daily candles used for volatility percentile sampling. | `100` |
+| `position_sizing_daily_sample_days` | Number of closed daily candles used for volatility rank sampling. The runtime fetches `sample_days + 2` daily candles to exclude the in-progress candle safely. | `25` |
 | `position_sizing_live_window_hours` | Number of recent 1-hour candles used to measure live volatility. | `24` |
-| `position_size_ratio_min` | Lower bound on the margin usage ratio. | `0.01` |
-| `position_size_ratio_max` | Upper bound on the margin usage ratio. | `0.99` |
+| `position_size_ratio_min` | Lower bound on the margin usage ratio. With the default 25-day sample, rank `1` maps to this value. | `0.02` |
+| `position_size_ratio_max` | Upper bound on the margin usage ratio. With the default 25-day sample, rank `25` maps to this value. | `0.98` |
 | `gemini_api_version` | Optional runtime config key with a default in code. | `v1beta` by default |
 
 ### How `setting.yaml` affects behavior | `setting.yaml`이 실제 동작에 미치는 영향
@@ -255,6 +255,9 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 
 - Volatility sizing fields determine how adaptive the system becomes under calm versus fast markets.
 - 변동성 사이징 관련 값들은 조용한 시장과 급변하는 시장에서 시스템이 얼마나 유연하게 대응하는지를 결정합니다.
+
+- With the default sizing model, the runtime ranks current 24-hour volatility against the latest 25 closed daily candles and linearly maps rank `1 -> 0.02`, rank `25 -> 0.98`, including interpolation for values between sample ranks.
+- 기본 변동성 사이징 모델에서는 현재 24시간 변동성을 최근 종료된 25개 일봉과 비교해 랭크를 구하고, 이를 `rank 1 -> 0.02`, `rank 25 -> 0.98`로 선형 매핑하며 중간 구간도 보간해 반영합니다.
 
 ## How to Run | 실행 방법
 

@@ -35,7 +35,14 @@ from src.binance.trade_position import (
 )
 from src.infra.env_loader import get_binance_credentials
 from src.infra.logger import format_log_details, get_logger
-from src.strategy.runtime_config import DEFAULT_GEMINI_API_VERSION, load_runtime_config
+from src.strategy.runtime_config import (
+    DEFAULT_GEMINI_API_VERSION,
+    DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
+    DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
+    DEFAULT_POSITION_SIZE_RATIO_MAX,
+    DEFAULT_POSITION_SIZE_RATIO_MIN,
+    load_runtime_config,
+)
 
 logger = get_logger("hakai_strategy")
 
@@ -145,16 +152,22 @@ def _load_strategy_config() -> Dict[str, Any]:
         logger.warning("Forcing symbol=%s to BTCUSDT-only runtime", symbol)
         symbol = DEFAULT_SYMBOL
 
-    position_size_ratio_min = _normalize_ratio(raw.get("position_size_ratio_min", 0.01), 0.01)
-    position_size_ratio_max = _normalize_ratio(raw.get("position_size_ratio_max", 0.99), 0.99)
+    position_size_ratio_min = _normalize_ratio(
+        raw.get("position_size_ratio_min", DEFAULT_POSITION_SIZE_RATIO_MIN),
+        DEFAULT_POSITION_SIZE_RATIO_MIN,
+    )
+    position_size_ratio_max = _normalize_ratio(
+        raw.get("position_size_ratio_max", DEFAULT_POSITION_SIZE_RATIO_MAX),
+        DEFAULT_POSITION_SIZE_RATIO_MAX,
+    )
     if position_size_ratio_max <= position_size_ratio_min:
         logger.warning(
             "Invalid position size ratio bounds min=%s max=%s; using defaults",
             raw.get("position_size_ratio_min"),
             raw.get("position_size_ratio_max"),
         )
-        position_size_ratio_min = 0.01
-        position_size_ratio_max = 0.99
+        position_size_ratio_min = DEFAULT_POSITION_SIZE_RATIO_MIN
+        position_size_ratio_max = DEFAULT_POSITION_SIZE_RATIO_MAX
 
     return {
         "symbol": symbol,
@@ -164,12 +177,12 @@ def _load_strategy_config() -> Dict[str, Any]:
         "stop_loss_pct": _normalize_ratio(raw.get("stop_loss_pct", 0.04), 0.04),
         "ai_candle_count_per_timeframe": _normalize_positive_int(raw.get("ai_candle_count_per_timeframe", 24), 24),
         "position_sizing_daily_sample_days": _normalize_positive_int(
-            raw.get("position_sizing_daily_sample_days", 100),
-            100,
+            raw.get("position_sizing_daily_sample_days", DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS),
+            DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
         ),
         "position_sizing_live_window_hours": _normalize_positive_int(
-            raw.get("position_sizing_live_window_hours", 24),
-            24,
+            raw.get("position_sizing_live_window_hours", DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS),
+            DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
         ),
         "position_size_ratio_min": float(position_size_ratio_min),
         "position_size_ratio_max": float(position_size_ratio_max),
@@ -454,7 +467,7 @@ def _fetch_prompt_market_context(
         daily_position_sizing_candles is None
         or len(daily_position_sizing_candles) < position_sizing_daily_sample_days
     ):
-        raise ValueError("1d candles unavailable for percentile position sizing")
+        raise ValueError("1d candles unavailable for rank-based position sizing")
 
     return {
         "timeframes": timeframe_payload,
@@ -591,6 +604,22 @@ def _estimate_percentile_position(sorted_samples: Sequence[float], value: float)
     }
 
 
+def _interpolate_rank_to_margin_ratio(
+    *,
+    rank_estimate: float,
+    sample_size: int,
+    ratio_min: float,
+    ratio_max: float,
+) -> float:
+    resolved_sample_size = max(1, int(sample_size))
+    clamped_rank = min(max(float(rank_estimate), 1.0), float(resolved_sample_size))
+    if resolved_sample_size == 1:
+        return float(ratio_max if float(rank_estimate) >= 1.0 else ratio_min)
+
+    normalized_rank = (clamped_rank - 1.0) / float(resolved_sample_size - 1)
+    return float(ratio_min + (normalized_rank * (ratio_max - ratio_min)))
+
+
 def _calculate_volatility_snapshot(
     daily_candles: Sequence[Dict[str, Any]],
     *,
@@ -606,7 +635,7 @@ def _calculate_volatility_snapshot(
     relevant_daily_candles = list(daily_candles or [])[-resolved_daily_sample_days:]
     relevant_live_window_candles = list(live_window_candles or [])[-resolved_live_window_hours:]
     if len(relevant_daily_candles) < resolved_daily_sample_days:
-        raise ValueError("not enough daily candles for percentile position sizing")
+        raise ValueError("not enough daily candles for rank-based position sizing")
     if len(relevant_live_window_candles) < resolved_live_window_hours:
         raise ValueError("not enough 1h candles for live window calculation")
 
@@ -652,7 +681,22 @@ def _calculate_volatility_snapshot(
 
     percentile_position = _estimate_percentile_position(daily_log_samples, live_range_log)
     raw_percentile = float(percentile_position["raw_percentile"])
-    target_margin_ratio = min(max(raw_percentile, resolved_ratio_min), resolved_ratio_max)
+    rank_estimate = float(percentile_position["rank_estimate"])
+    # Keep the requested 25-rank sizing rule by default, while preserving linear interpolation
+    # between configured bounds when operators choose different sample sizes or ratio limits.
+    unclamped_margin_ratio = (
+        ((rank_estimate * 4.0) - 2.0) * 0.01
+        if len(daily_log_samples) == DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS
+        and math.isclose(resolved_ratio_min, DEFAULT_POSITION_SIZE_RATIO_MIN, rel_tol=0.0, abs_tol=1e-9)
+        and math.isclose(resolved_ratio_max, DEFAULT_POSITION_SIZE_RATIO_MAX, rel_tol=0.0, abs_tol=1e-9)
+        else _interpolate_rank_to_margin_ratio(
+            rank_estimate=rank_estimate,
+            sample_size=len(daily_log_samples),
+            ratio_min=resolved_ratio_min,
+            ratio_max=resolved_ratio_max,
+        )
+    )
+    target_margin_ratio = min(max(unclamped_margin_ratio, resolved_ratio_min), resolved_ratio_max)
     target_effective_leverage = target_margin_ratio * float(leverage)
 
     return {
@@ -666,7 +710,7 @@ def _calculate_volatility_snapshot(
         "live_range_low": float(live_range_low),
         "live_range_log": float(live_range_log),
         "raw_percentile": raw_percentile,
-        "percentile_rank_estimate": float(percentile_position["rank_estimate"]),
+        "percentile_rank_estimate": rank_estimate,
         "percentile_rank_floor": int(percentile_position["rank_floor"]),
         "percentile_rank_ceiling": int(percentile_position["rank_ceiling"]),
         "interpolation_weight": float(percentile_position["interpolation_weight"]),
@@ -675,6 +719,7 @@ def _calculate_volatility_snapshot(
         "percentile_location": str(percentile_position["location"]),
         "position_size_ratio_min": float(resolved_ratio_min),
         "position_size_ratio_max": float(resolved_ratio_max),
+        "rank_interpolated_margin_ratio": float(unclamped_margin_ratio),
         "target_margin_ratio": float(target_margin_ratio),
         "target_effective_leverage": float(target_effective_leverage),
     }

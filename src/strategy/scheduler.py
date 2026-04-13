@@ -451,11 +451,11 @@ class TradingScheduler:
         direction_suffix = f" ({ai_decision})" if ai_decision else ""
 
         if action == "scaled_in_position":
-            return f"Hourly AI scaled in via 24h percentile sizing{direction_suffix}."
+            return f"Hourly AI scaled in via 24h volatility rank sizing{direction_suffix}."
         if action == "scaled_out_position":
-            return f"Hourly AI scaled out via 24h percentile sizing{direction_suffix}."
+            return f"Hourly AI scaled out via 24h volatility rank sizing{direction_suffix}."
         if action == "kept_position_size":
-            return f"Hourly AI kept size via 24h percentile sizing{direction_suffix}."
+            return f"Hourly AI kept size via 24h volatility rank sizing{direction_suffix}."
         if action == "opened_new_position":
             return f"Hourly AI opened a new position{direction_suffix}."
         if action == "reversed_position":
