@@ -2003,11 +2003,30 @@ def _determine_ai_trigger(
     }
 
 
+def _build_forced_ai_trigger(
+    *,
+    current_price: float,
+    trigger_pct_usdt: float,
+    reason: str,
+) -> Dict[str, Any]:
+    next_levels = _build_trigger_levels(current_price, trigger_pct_usdt)
+    return {
+        "should_trigger": True,
+        "reason": str(reason or "").strip() or "forced_trigger",
+        "current_trigger_price": next_levels["trigger_price"],
+        "trigger_price": next_levels["trigger_price"],
+        "next_trigger_down": next_levels["next_trigger_down"],
+        "next_trigger_up": next_levels["next_trigger_up"],
+        "boundary_source": "forced_trigger",
+    }
+
+
 # Cycle entrypoints.
 def run_hakai_cycle(
     *,
     state: Optional[Dict[str, Any]] = None,
     as_of_ms: Optional[int] = None,
+    forced_trigger_reason: Optional[str] = None,
     notification_callback: NotificationCallback = None,
 ) -> Dict[str, Any]:
     """Run one full HAK GEMINI BINANCE TRADER cycle and return a serializable result payload."""
@@ -2210,14 +2229,21 @@ def run_hakai_cycle(
                 ),
             )
 
-    trigger_info = _determine_ai_trigger(
-        has_position=has_position,
-        current_price=reference_price,
-        last_ai_trigger_price=_normalize_trigger_price(previous_state.get("last_ai_trigger_price")),
-        trigger_pct_usdt=trigger_pct_usdt,
-        next_trigger_down=_normalize_trigger_price(previous_state.get("next_trigger_down")),
-        next_trigger_up=_normalize_trigger_price(previous_state.get("next_trigger_up")),
-    )
+    if str(forced_trigger_reason or "").strip():
+        trigger_info = _build_forced_ai_trigger(
+            current_price=reference_price,
+            trigger_pct_usdt=trigger_pct_usdt,
+            reason=str(forced_trigger_reason),
+        )
+    else:
+        trigger_info = _determine_ai_trigger(
+            has_position=has_position,
+            current_price=reference_price,
+            last_ai_trigger_price=_normalize_trigger_price(previous_state.get("last_ai_trigger_price")),
+            trigger_pct_usdt=trigger_pct_usdt,
+            next_trigger_down=_normalize_trigger_price(previous_state.get("next_trigger_down")),
+            next_trigger_up=_normalize_trigger_price(previous_state.get("next_trigger_up")),
+        )
     trigger_price = _normalize_trigger_price(trigger_info.get("trigger_price"))
     result["trigger_reason"] = trigger_info.get("reason")
     result["trigger_price"] = trigger_price
@@ -2677,422 +2703,27 @@ def run_hourly_volatility_resize(
     state: Optional[Dict[str, Any]] = None,
     notification_callback: NotificationCallback = None,
 ) -> Dict[str, Any]:
-    """Re-evaluate open-position sizing on the hourly reporting boundary."""
-    config = _load_strategy_config()
-    symbol = str(config["symbol"])
-    leverage = int(config["fixed_leverage"])
-    trigger_pct_usdt = float(config["trigger_pct_usdt"])
-    initial_position_size_ratio = float(config["initial_position_size_ratio"])
-    position_size_ratio_max = float(config["position_size_ratio_max"])
-    profit_activation_pct = float(config["profit_activation_pct"])
-    stop_loss_account_risk_pct = float(config["stop_loss_pct"])
-    resolved_as_of_ms = _safe_int(as_of_ms, 0) or _current_time_ms()
-    previous_state = dict(state or {})
-    state_stop_risk_basis = _normalize_stop_risk_basis(previous_state.get("stop_risk_basis"))
-    position_episode_state = _normalize_position_episode_state(previous_state)
-    position_episode_bootstrapped = False
-
-    result: Dict[str, Any] = {
-        "success": False,
-        "symbol": symbol,
-        "action": "init",
-        "ai_triggered": False,
-        "ai_decision": None,
-        "ai_analysis": None,
-        "cycle_dir": None,
-        "current_price": None,
-        "next_trigger_down": None,
-        "next_trigger_up": None,
-        "decision": None,
-        "position": None,
-        "position_before": None,
-        "volatility_snapshot": None,
-        "account_equity": None,
-        "target_notional_usdt": None,
-        "execution": None,
-        "position_sizing": None,
-        "state_update": _build_state_update(
-            previous_state=previous_state,
-            trigger_pct_usdt=trigger_pct_usdt,
-            ai_triggered=False,
-            trigger_price=None,
-            ai_decision=None,
-            next_trigger_down=None,
-            next_trigger_up=None,
-            position_episode_state=position_episode_state,
-            stop_risk_basis=state_stop_risk_basis,
-        ),
-        "stop_risk_basis": dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None,
-    }
+    """Run the hourly AI evaluation through the main AI cycle pipeline."""
+    delegated_result = run_hakai_cycle(
+        state=state,
+        as_of_ms=as_of_ms,
+        forced_trigger_reason="hourly_time_trigger",
+        notification_callback=notification_callback,
+    )
     logger.info(
-        "Hourly volatility resize started | %s",
+        "Hourly volatility resize completed via main AI cycle | %s",
         format_log_details(
             {
-                "symbol": symbol,
-                "as_of_ms": resolved_as_of_ms,
-                "fixed_leverage": leverage,
-                "previous_last_ai_decision": previous_state.get("last_ai_decision"),
-                "previous_last_ai_trigger_price": previous_state.get("last_ai_trigger_price"),
+                "symbol": delegated_result.get("symbol"),
+                "success": delegated_result.get("success"),
+                "action": delegated_result.get("action"),
+                "ai_decision": delegated_result.get("ai_decision"),
+                "trigger_reason": delegated_result.get("trigger_reason"),
+                "cycle_dir": delegated_result.get("cycle_dir"),
             }
         ),
     )
-
-    try:
-        api_key, api_secret = get_binance_credentials()
-    except ValueError as exc:
-        result["action"] = "credentials_error"
-        result["error"] = str(exc)
-        return result
-
-    positions = get_positions(api_key, api_secret)
-    if positions is None:
-        result["action"] = "positions_fetch_failed"
-        return result
-
-    universe_error = _validate_position_universe(positions, symbol)
-    if universe_error:
-        result["action"] = universe_error
-        return result
-
-    current_position = _extract_managed_position(positions, symbol)
-    if current_position is not None:
-        episode_reconcile = _reconcile_position_episode_state(
-            previous_state=previous_state,
-            current_position=current_position,
-        )
-        position_episode_state = episode_reconcile["position_episode_state"]
-        position_episode_bootstrapped = bool(episode_reconcile["bootstrapped"])
-        current_position_metrics = calculate_position_metrics(current_position)
-        result["position_before"] = dict(current_position_metrics)
-        result["position"] = dict(current_position_metrics)
-        if not _stop_risk_basis_matches_position(state_stop_risk_basis, current_position):
-            state_stop_risk_basis = None
-            result["stop_risk_basis"] = None
-        else:
-            result["position_before"] = _enrich_position_with_stop_risk(
-                result.get("position_before"),
-                state_stop_risk_basis,
-            )
-            result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
-    else:
-        position_episode_state = _empty_position_episode_state()
-        state_stop_risk_basis = None
-        result["stop_risk_basis"] = None
-    result["state_update"] = _build_state_update(
-        previous_state=previous_state,
-        trigger_pct_usdt=trigger_pct_usdt,
-        ai_triggered=False,
-        trigger_price=None,
-        ai_decision=None,
-        next_trigger_down=None,
-        next_trigger_up=None,
-        position_episode_state=position_episode_state,
-        stop_risk_basis=state_stop_risk_basis,
-    )
-
-    reference_price_payload = get_reference_price(symbol)
-    reference_price = _format_price((reference_price_payload or {}).get("price"))
-    if reference_price is None:
-        result["action"] = "reference_price_unavailable"
-        return result
-    result["current_price"] = reference_price
-    position_episode_state = _update_position_episode_unlock_state(
-        position_episode_state=position_episode_state,
-        current_position=current_position,
-        reference_price=reference_price,
-        profit_activation_pct=profit_activation_pct,
-    )
-
-    market_context = _fetch_prompt_market_context(
-        symbol=symbol,
-        candle_count=int(config["ai_candle_count_per_timeframe"]),
-        position_sizing_daily_sample_days=int(config["position_sizing_daily_sample_days"]),
-        position_sizing_live_window_hours=int(config["position_sizing_live_window_hours"]),
-        as_of_ms=resolved_as_of_ms,
-    )
-    volatility_snapshot = _calculate_volatility_snapshot(
-        market_context["daily_position_sizing_candles"],
-        daily_sample_days=int(config["position_sizing_daily_sample_days"]),
-        live_window_candles=market_context["live_window_candles"],
-        live_window_hours=int(config["position_sizing_live_window_hours"]),
-        leverage=leverage,
-        position_size_ratio_max=position_size_ratio_max,
-    )
-    result["volatility_snapshot"] = volatility_snapshot
-    hourly_trigger_window = _build_trigger_levels(reference_price, trigger_pct_usdt)
-    result["next_trigger_down"] = hourly_trigger_window["next_trigger_down"]
-    result["next_trigger_up"] = hourly_trigger_window["next_trigger_up"]
-
-    cycle_dir = _create_cycle_dir()
-    result["cycle_dir"] = cycle_dir
-    prompt_position_snapshot = _fetch_live_prompt_position_snapshot(
-        api_key=api_key,
-        api_secret=api_secret,
-        symbol=symbol,
-    )
-    logger.info(
-        "Hourly AI prompt context prepared | %s",
-        format_log_details(
-            {
-                "symbol": symbol,
-                "cycle_dir": cycle_dir,
-                "timeframes": {key: len(value) for key, value in market_context["timeframes"].items()},
-                "volatility_snapshot": volatility_snapshot,
-                "prompt_position": _position_summary_for_log(prompt_position_snapshot),
-            }
-        ),
-    )
-
-    ai_analysis: Dict[str, Any] = {}
-    _emit_notification(
-        notification_callback,
-        "ai_cycle_before",
-        {
-            "timestamp": _current_time_utc().isoformat(),
-            "symbol": symbol,
-            "cycle_dir": cycle_dir,
-            "current_price": reference_price,
-            "trigger_reason": "hourly_time_trigger",
-            "trigger_price": reference_price,
-            "next_trigger_down": result.get("next_trigger_down"),
-            "next_trigger_up": result.get("next_trigger_up"),
-            "position": result.get("position_before"),
-            "previous_ai_decision": previous_state.get("last_ai_decision"),
-            "volatility_snapshot": volatility_snapshot,
-        },
-    )
-    ai_decision = evaluate_hakai_direction(
-        cycle_dir=cycle_dir,
-        symbol=symbol,
-        reference_price=reference_price,
-        timeframe_ohlcv=market_context["timeframes"],
-        api_version=str(config["gemini_api_version"]),
-        thinking_level=str(config["gemini_thinking_level"]),
-        analysis_sink=ai_analysis,
-        current_position_snapshot=prompt_position_snapshot,
-    )
-    if ai_decision is None:
-        result["action"] = "ai_decision_failed"
-        if ai_analysis:
-            result["ai_analysis"] = dict(ai_analysis)
-        _emit_notification(
-            notification_callback,
-            "ai_cycle_after",
-            {
-                "timestamp": _current_time_utc().isoformat(),
-                "success": False,
-                "symbol": symbol,
-                "cycle_dir": cycle_dir,
-                "current_price": reference_price,
-                "trigger_reason": "hourly_time_trigger",
-                "decision": None,
-                "analysis": dict(ai_analysis),
-                "volatility_snapshot": volatility_snapshot,
-                "position": result.get("position_before"),
-            },
-        )
-        _persist_cycle_output(result)
-        return result
-
-    ai_state_update = _build_ai_state_update_from_reference_price(
-        previous_state=previous_state,
-        trigger_pct_usdt=trigger_pct_usdt,
-        reference_price=reference_price,
-        ai_decision=ai_decision.decision,
-        position_episode_state=position_episode_state,
-        stop_risk_basis=state_stop_risk_basis,
-    )
-    result["ai_triggered"] = True
-    result["ai_decision"] = ai_decision.decision
-    result["ai_analysis"] = dict(ai_analysis)
-    result["decision"] = ai_decision.decision
-    result["state_update"] = ai_state_update
-    _emit_notification(
-        notification_callback,
-        "ai_cycle_after",
-        {
-            "timestamp": _current_time_utc().isoformat(),
-            "success": True,
-            "symbol": symbol,
-            "cycle_dir": cycle_dir,
-            "current_price": reference_price,
-            "trigger_reason": "hourly_time_trigger",
-            "decision": ai_decision.decision,
-            "analysis": dict(ai_analysis),
-            "volatility_snapshot": volatility_snapshot,
-            "position": result.get("position_before"),
-        },
-    )
-
-    account_equity = _format_price(get_account_equity(api_key, api_secret))
-    if account_equity is None:
-        result["action"] = "account_equity_unavailable"
-        _persist_cycle_output(result)
-        return result
-    result["account_equity"] = account_equity
-
-    position_sizing_plan = _build_position_sizing_plan(
-        volatility_snapshot=volatility_snapshot,
-        current_position=current_position,
-        decision=ai_decision.decision,
-        reference_price=reference_price,
-        leverage=leverage,
-        initial_position_size_ratio=initial_position_size_ratio,
-        position_size_ratio_max=position_size_ratio_max,
-        profit_activation_pct=profit_activation_pct,
-        position_episode_state=position_episode_state,
-        bootstrap_protected=position_episode_bootstrapped,
-    )
-    result["position_sizing"] = dict(position_sizing_plan)
-    volatility_snapshot = _annotate_volatility_snapshot_with_position_sizing(
-        volatility_snapshot=volatility_snapshot,
-        position_sizing_plan=position_sizing_plan,
-    )
-    result["volatility_snapshot"] = volatility_snapshot
-    target_notional_usdt = _resolve_target_notional_usdt(
-        account_equity=account_equity,
-        leverage=leverage,
-        current_position=current_position,
-        position_sizing_plan=position_sizing_plan,
-    )
-    result["target_notional_usdt"] = target_notional_usdt
-    logger.info(
-        "Hourly volatility position sizing computed | %s",
-        format_log_details(
-            {
-                "symbol": symbol,
-                "decision": ai_decision.decision,
-                "account_equity": account_equity,
-                "target_margin_ratio": volatility_snapshot.get("target_margin_ratio"),
-                "target_effective_leverage": volatility_snapshot.get("target_effective_leverage"),
-                "target_notional_usdt": target_notional_usdt,
-                "position_sizing": position_sizing_plan,
-                "sizing_summary": _format_percentile_sizing_summary(volatility_snapshot),
-            }
-        ),
-    )
-
-    applied_leverage = set_leverage(api_key, api_secret, symbol, leverage)
-    if applied_leverage is None:
-        result["action"] = "set_leverage_failed"
-        _persist_cycle_output(result)
-        return result
-
-    leverage = int(applied_leverage)
-    result["applied_leverage"] = leverage
-
-    if current_position is None:
-        execution_result = _place_new_direction_position(
-            api_key=api_key,
-            api_secret=api_secret,
-            symbol=symbol,
-            decision=ai_decision.decision,
-            target_notional_usdt=target_notional_usdt,
-            reference_price=reference_price,
-            leverage=leverage,
-        )
-    else:
-        execution_result = _rebalance_existing_position(
-            api_key=api_key,
-            api_secret=api_secret,
-            symbol=symbol,
-            current_position=current_position,
-            decision=ai_decision.decision,
-            target_notional_usdt=target_notional_usdt,
-            reference_price=reference_price,
-            leverage=leverage,
-        )
-    result["execution"] = execution_result
-    logger.info(
-        "Hourly volatility execution result captured | %s",
-        format_log_details(
-            {
-                "symbol": symbol,
-                "decision": ai_decision.decision,
-                "execution": execution_result,
-            }
-        ),
-    )
-    if not bool(execution_result.get("success")):
-        result["action"] = str(execution_result.get("action") or "execution_failed")
-        _persist_cycle_output(result)
-        return result
-
-    result["success"] = True
-    result["action"] = str(execution_result.get("action") or "executed")
-
-    did_resize = result["action"] in {
-        "scaled_in_position",
-        "scaled_out_position",
-        "reversed_position",
-        "opened_new_position",
-    }
-    if did_resize:
-        synced_position = _fetch_synced_position(
-            api_key=api_key,
-            api_secret=api_secret,
-            symbol=symbol,
-            previous_position=current_position,
-            expected_action=result.get("action"),
-        )
-        result["position"] = calculate_position_metrics(synced_position) if synced_position is not None else None
-        if synced_position is not None:
-            state_stop_risk_basis = _build_stop_risk_basis_from_position(
-                position=synced_position,
-                account_equity=account_equity,
-                stop_loss_account_risk_pct=stop_loss_account_risk_pct,
-            )
-            result["stop_risk_basis"] = dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None
-            synced_stop_result = _sync_account_risk_stop_loss(
-                api_key=api_key,
-                api_secret=api_secret,
-                symbol=symbol,
-                position=synced_position,
-                stop_risk_basis=state_stop_risk_basis,
-            )
-            result["post_trade_stop_sync"] = synced_stop_result
-            result["position"] = _apply_synced_stop_loss_to_position(result.get("position"), synced_stop_result)
-            result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
-        else:
-            state_stop_risk_basis = None
-            result["stop_risk_basis"] = None
-    position_episode_state = _resolve_post_trade_position_episode_state(
-        previous_position_episode_state=position_episode_state,
-        previous_position=current_position,
-        current_position=(
-            synced_position
-            if did_resize and synced_position is not None
-            else current_position
-            if result["action"] in {"kept_position_size", "skipped_scale_in_below_min_notional"}
-            else None
-        ),
-        execution_action=result.get("action"),
-    )
-    result["state_update"] = _build_ai_state_update_from_reference_price(
-        previous_state=previous_state,
-        trigger_pct_usdt=trigger_pct_usdt,
-        reference_price=reference_price,
-        ai_decision=ai_decision.decision,
-        position_episode_state=position_episode_state,
-        stop_risk_basis=state_stop_risk_basis,
-    )
-    _persist_cycle_output(result)
-    logger.info(
-        "Hourly volatility resize completed | %s",
-        format_log_details(
-            {
-                "symbol": symbol,
-                "success": result["success"],
-                "action": result["action"],
-                "decision": result.get("decision"),
-                "cycle_dir": result.get("cycle_dir"),
-                "current_price": result.get("current_price"),
-                "position_before": _position_summary_for_log(result.get("position_before")),
-                "position_after": _position_summary_for_log(result.get("position")),
-            }
-        ),
-    )
-    return result
+    return delegated_result
 
 
 __all__ = [

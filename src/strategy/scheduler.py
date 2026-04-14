@@ -30,6 +30,7 @@ TRIGGER_REASON_LABELS = {
     "waiting_for_next_round_trigger": "Waiting for next round",
     "price_distance_reached": "Next price level reached",
     "waiting_for_next_price_trigger": "Waiting for next price level",
+    "hourly_time_trigger": "Hourly time trigger",
 }
 
 ACTION_LABELS = {
@@ -209,6 +210,8 @@ class TradingScheduler:
             "current_price": result.get("current_price"),
             "ai_triggered": bool(result.get("ai_triggered")),
             "ai_decision": result.get("ai_decision"),
+            "trigger_reason": result.get("trigger_reason"),
+            "trigger_price": result.get("trigger_price"),
             "next_trigger_down": result.get("next_trigger_down"),
             "next_trigger_up": result.get("next_trigger_up"),
             "cycle_dir": result.get("cycle_dir"),
@@ -609,17 +612,10 @@ class TradingScheduler:
             state=dict(self.state),
             notification_callback=self._notify_telegram_event,
         )
-        result["hourly_resize"] = hourly_resize_result
-        if hourly_resize_result.get("current_price") is not None:
-            result["current_price"] = hourly_resize_result.get("current_price")
-        if "position" in hourly_resize_result:
-            result["position"] = hourly_resize_result.get("position")
-        if hourly_resize_result.get("post_trade_stop_sync") is not None:
-            result["post_trade_stop_sync"] = hourly_resize_result.get("post_trade_stop_sync")
-        if hourly_resize_result.get("next_trigger_down") is not None:
-            result["next_trigger_down"] = hourly_resize_result.get("next_trigger_down")
-        if hourly_resize_result.get("next_trigger_up") is not None:
-            result["next_trigger_up"] = hourly_resize_result.get("next_trigger_up")
+        canonical_result = dict(hourly_resize_result)
+        canonical_result["hourly_resize"] = dict(hourly_resize_result)
+        result.clear()
+        result.update(canonical_result)
         self._merge_state_update(hourly_resize_result.get("state_update"))
         self.state["last_hourly_resize_slot"] = hourly_slot
         logger.info(
@@ -673,6 +669,10 @@ class TradingScheduler:
                 (
                     self._format_html_title("Trigger", emoji="🎯"),
                     [
+                        self._format_html_line(
+                            "Reason",
+                            self._translate_trigger_reason(payload.get("trigger_reason")),
+                        ),
                         self._format_html_line(
                             "Trigger Price",
                             self._format_usdt(payload.get("trigger_price")),
@@ -806,6 +806,7 @@ class TradingScheduler:
                 self._format_html_line("Symbol", payload.get("symbol"), code=True),
                 self._format_html_line("Price", self._format_usdt(payload.get("current_price"))),
                 self._format_html_line("Action", self._translate_action(payload.get("action"))),
+                self._format_html_line("Trigger", self._translate_trigger_reason(payload.get("trigger_reason"))),
                 self._format_html_line("Direction", direction, bold=True),
             ],
             sections=sections,
