@@ -283,7 +283,10 @@ class TradingScheduler:
         if keep_current_position_size:
             status_text = "Bootstrap hold"
         elif not is_unlocked and activation_price is not None:
-            status_text = f"Locked until {self._format_usdt(activation_price, digits=0)}"
+            status_text = (
+                f"Final {target_margin_ratio * 100.0:.2f}% "
+                f"(Locked until {self._format_usdt(activation_price, digits=0)})"
+            )
         else:
             floor_kept = False
             try:

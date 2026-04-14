@@ -1082,6 +1082,50 @@ def _annotate_volatility_snapshot_with_position_sizing(
     return annotated_snapshot
 
 
+def _build_pre_ai_display_volatility_snapshot(
+    *,
+    volatility_snapshot: Dict[str, Any],
+    current_position: Optional[Dict[str, Any]],
+    position_episode_state: Any,
+    initial_position_size_ratio: float,
+    profit_activation_pct: float,
+    bootstrap_protected: bool,
+) -> Dict[str, Any]:
+    display_snapshot = dict(volatility_snapshot or {})
+    normalized_episode_state = _normalize_position_episode_state(position_episode_state)
+    current_metrics = calculate_position_metrics(current_position)
+    current_direction = _normalize_position_episode_direction(current_metrics.get("direction"))
+
+    keep_current_position_size = bool(
+        bootstrap_protected
+        and current_direction in {"long", "short"}
+    )
+    unlocked = bool(normalized_episode_state["position_sizing_unlocked"])
+    activation_price = None
+    if (
+        normalized_episode_state["initial_entry_price"] is not None
+        and normalized_episode_state["initial_entry_direction"] in {"long", "short"}
+    ):
+        activation_price = _resolve_profit_activation_price(
+            direction=normalized_episode_state["initial_entry_direction"],
+            entry_price=normalized_episode_state["initial_entry_price"],
+            profit_activation_pct=profit_activation_pct,
+        )
+
+    display_snapshot["initial_position_size_ratio"] = float(initial_position_size_ratio)
+    display_snapshot["position_sizing_unlocked"] = unlocked
+    display_snapshot["keep_current_position_size"] = keep_current_position_size
+    if activation_price is not None:
+        display_snapshot["position_sizing_activation_price"] = activation_price
+
+    if current_position is None or keep_current_position_size or not unlocked:
+        applied_margin_ratio = float(initial_position_size_ratio)
+        display_snapshot["applied_target_margin_ratio"] = applied_margin_ratio
+        display_snapshot["target_margin_ratio"] = applied_margin_ratio
+
+    return display_snapshot
+
+
 def _resolve_target_notional_usdt(
     *,
     account_equity: float,
@@ -2336,6 +2380,14 @@ def run_hakai_cycle(
             }
         ),
     )
+    display_volatility_snapshot = _build_pre_ai_display_volatility_snapshot(
+        volatility_snapshot=volatility_snapshot,
+        current_position=current_position,
+        position_episode_state=position_episode_state,
+        initial_position_size_ratio=initial_position_size_ratio,
+        profit_activation_pct=profit_activation_pct,
+        bootstrap_protected=position_episode_bootstrapped,
+    )
 
     prompt_position_snapshot = _fetch_live_prompt_position_snapshot(
         api_key=api_key,
@@ -2368,7 +2420,7 @@ def run_hakai_cycle(
             "next_trigger_up": result.get("next_trigger_up"),
             "position": result.get("position_before"),
             "previous_ai_decision": previous_state.get("last_ai_decision"),
-            "volatility_snapshot": volatility_snapshot,
+            "volatility_snapshot": display_volatility_snapshot,
         },
     )
 
