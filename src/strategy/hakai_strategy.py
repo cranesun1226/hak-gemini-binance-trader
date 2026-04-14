@@ -940,6 +940,16 @@ def _update_position_episode_unlock_state(
     return unlocked_state
 
 
+def _did_position_sizing_just_unlock(
+    *,
+    previous_position_episode_state: Any,
+    current_position_episode_state: Any,
+) -> bool:
+    previous_unlocked = bool(_normalize_position_episode_state(previous_position_episode_state)["position_sizing_unlocked"])
+    current_unlocked = bool(_normalize_position_episode_state(current_position_episode_state)["position_sizing_unlocked"])
+    return (not previous_unlocked) and current_unlocked
+
+
 def _build_position_sizing_plan(
     *,
     volatility_snapshot: Dict[str, Any],
@@ -2221,11 +2231,16 @@ def run_hakai_cycle(
         return result
 
     result["current_price"] = reference_price
+    position_episode_state_before_unlock = dict(position_episode_state)
     position_episode_state = _update_position_episode_unlock_state(
         position_episode_state=position_episode_state,
         current_position=current_position,
         reference_price=reference_price,
         profit_activation_pct=profit_activation_pct,
+    )
+    position_sizing_just_unlocked = _did_position_sizing_just_unlock(
+        previous_position_episode_state=position_episode_state_before_unlock,
+        current_position_episode_state=position_episode_state,
     )
 
     stop_sync_result: Optional[Dict[str, Any]] = None
@@ -2273,11 +2288,15 @@ def run_hakai_cycle(
                 ),
             )
 
-    if str(forced_trigger_reason or "").strip():
+    effective_forced_trigger_reason = str(forced_trigger_reason or "").strip()
+    if not effective_forced_trigger_reason and position_sizing_just_unlocked:
+        effective_forced_trigger_reason = "profit_activation_unlocked"
+
+    if effective_forced_trigger_reason:
         trigger_info = _build_forced_ai_trigger(
             current_price=reference_price,
             trigger_pct_usdt=trigger_pct_usdt,
-            reason=str(forced_trigger_reason),
+            reason=effective_forced_trigger_reason,
         )
     else:
         trigger_info = _determine_ai_trigger(

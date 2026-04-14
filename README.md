@@ -102,11 +102,11 @@ flowchart LR
 3. If there is an existing position, the system first verifies and synchronizes stop-loss protection from the stored account-risk basis.
    기존 포지션이 있으면 먼저 저장된 계좌 리스크 기준으로 손절 보호 주문 상태를 점검하고 동기화합니다.
 
-4. The trigger engine decides whether the latest price move is large enough to justify a fresh AI decision.
-   트리거 엔진이 최근 가격 변동이 새로운 AI 판단을 요청할 만큼 충분한지 판정합니다.
+4. The trigger engine decides whether the latest price move is large enough to justify a fresh AI decision, and it also forces an AI cycle immediately when the profit-gated sizing lock unlocks.
+   트리거 엔진은 최근 가격 변동이 새로운 AI 판단을 요청할 만큼 충분한지 판정하고, 수익 조건부 사이징 lock 이 해제되는 순간에도 즉시 AI 사이클을 강제 실행합니다.
 
-5. If no trigger is reached, the system updates state and exits the cycle without unnecessary AI cost.
-   트리거가 충족되지 않으면 상태만 갱신하고 AI 비용을 발생시키지 않은 채 사이클을 종료합니다.
+5. If neither a price trigger nor an unlock trigger is reached, the system updates state and exits the cycle without unnecessary AI cost.
+   가격 트리거나 unlock 트리거가 모두 충족되지 않으면 상태만 갱신하고 AI 비용을 발생시키지 않은 채 사이클을 종료합니다.
 
 6. If the trigger is reached, the runtime creates a cycle directory and gathers 1-day and 1-hour OHLCV context.
    트리거가 충족되면 사이클 디렉터리를 만들고 1일봉과 1시간봉 OHLCV 컨텍스트를 수집합니다.
@@ -257,8 +257,8 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 - Volatility sizing fields determine how adaptive the system becomes under calm versus fast markets.
 - 변동성 사이징 관련 값들은 조용한 시장과 급변하는 시장에서 시스템이 얼마나 유연하게 대응하는지를 결정합니다.
 
-- With the default sizing model, the runtime still ranks current 24-hour volatility against the latest 25 closed daily candles and derives a volatility ratio up to `0.98`, but fresh entries remain fixed at `0.4` until the recorded initial entry reaches the configured profit unlock threshold.
-- 기본 사이징 모델에서는 현재 24시간 변동성을 최근 종료된 25개 일봉과 비교해 최대 `0.98`까지의 변동성 비율을 계산하지만, 실제 신규 진입은 기록된 최초 진입이 설정된 수익 unlock 조건에 도달하기 전까지 `0.4`로 고정됩니다.
+- With the default sizing model, the runtime still ranks current 24-hour volatility against the latest 25 closed daily candles and derives a volatility ratio up to `0.98`, but fresh entries remain fixed at `0.4` until the recorded initial entry reaches the configured profit unlock threshold. When that unlock threshold is reached, the runtime immediately forces the normal AI cycle so the post-AI sizing and execution flow can rebalance in the same path.
+- 기본 사이징 모델에서는 현재 24시간 변동성을 최근 종료된 25개 일봉과 비교해 최대 `0.98`까지의 변동성 비율을 계산하지만, 실제 신규 진입은 기록된 최초 진입이 설정된 수익 unlock 조건에 도달하기 전까지 `0.4`로 고정됩니다. 이 unlock 조건에 도달하면 런타임은 기존 AI 사이클을 즉시 강제 실행해, AI 판단 이후의 사이징 및 실행 흐름이 동일한 경로에서 바로 이어지도록 합니다.
 
 ## How to Run | 실행 방법
 

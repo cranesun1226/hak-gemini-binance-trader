@@ -30,6 +30,7 @@ TRIGGER_REASON_LABELS = {
     "waiting_for_next_round_trigger": "Waiting for next round",
     "price_distance_reached": "Next price level reached",
     "waiting_for_next_price_trigger": "Waiting for next price level",
+    "profit_activation_unlocked": "Profit gate unlocked",
     "hourly_time_trigger": "Hourly time trigger",
 }
 
