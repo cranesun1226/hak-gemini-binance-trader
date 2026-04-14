@@ -18,7 +18,7 @@ logger = get_logger("scheduler")
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 STATE_FILE = os.path.join(ROOT_DIR, "scheduler_state.json")
 CONFIG_PATH = os.path.join(ROOT_DIR, "setting.yaml")
-STATE_VERSION = "7.3-hakai-trigger-pct"
+STATE_VERSION = "7.4-hakai-initial-entry-sizing"
 SCHEDULE_SECOND_OFFSET = 10
 HOURLY_REPORT_DELAY_SECONDS = 10
 
@@ -141,6 +141,10 @@ class TradingScheduler:
             "last_ai_decision": None,
             "next_trigger_down": None,
             "next_trigger_up": None,
+            "initial_entry_price": None,
+            "initial_entry_direction": None,
+            "position_sizing_unlocked": False,
+            "position_sizing_activated_at": None,
             "stop_risk_basis": None,
             "last_cycle_result": None,
             "last_hourly_report_slot": None,
@@ -168,6 +172,10 @@ class TradingScheduler:
                         merged["last_ai_trigger_price"] = None
                         merged["next_trigger_down"] = None
                         merged["next_trigger_up"] = None
+                        merged["initial_entry_price"] = None
+                        merged["initial_entry_direction"] = None
+                        merged["position_sizing_unlocked"] = False
+                        merged["position_sizing_activated_at"] = None
                     merged.pop("last_ai_trigger_round_price", None)
                     merged["version"] = STATE_VERSION
                     return merged
@@ -234,13 +242,26 @@ class TradingScheduler:
             return "-"
         return f"{parsed * 100.0:.2f}%"
 
+    def _get_display_target_margin_ratio(self, snapshot: Any) -> Any:
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        return payload.get("applied_target_margin_ratio", payload.get("target_margin_ratio"))
+
+    def _get_display_target_effective_leverage(self, snapshot: Any) -> Any:
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        return payload.get("applied_target_effective_leverage", payload.get("target_effective_leverage"))
+
     def _format_percentile_sizing_summary(self, snapshot: Any) -> str:
         payload = snapshot if isinstance(snapshot, dict) else {}
         try:
             live_range_log = float(payload.get("live_range_log"))
             rank_estimate = float(payload.get("percentile_rank_estimate"))
             sample_size = int(payload.get("sample_size"))
-            target_margin_ratio = float(payload.get("target_margin_ratio"))
+            volatility_margin_ratio = float(
+                payload.get("volatility_target_margin_ratio", payload.get("target_margin_ratio"))
+            )
+            target_margin_ratio = float(
+                payload.get("applied_target_margin_ratio", payload.get("target_margin_ratio"))
+            )
         except (TypeError, ValueError):
             return "-"
 
@@ -256,6 +277,7 @@ class TradingScheduler:
             f"24h ln {live_range_log:.4f} | "
             f"Rank {rank_estimate:.1f}/{sample_size} | "
             f"{location_label} | "
+            f"Vol {volatility_margin_ratio * 100.0:.2f}% | "
             f"Final {target_margin_ratio * 100.0:.2f}%"
         )
 
@@ -651,7 +673,7 @@ class TradingScheduler:
                         self._format_html_line("Now", self._format_position_summary(payload.get("position"))),
                         self._format_html_line(
                             "Target",
-                            self._format_pct(volatility_snapshot.get("target_margin_ratio")),
+                            self._format_pct(self._get_display_target_margin_ratio(volatility_snapshot)),
                         ),
                         self._format_html_line(
                             "Sizing",
@@ -742,11 +764,11 @@ class TradingScheduler:
                         self._format_html_line("Asset", self._format_usdt(payload.get("account_equity"))),
                         self._format_html_line(
                             "Position Pct",
-                            self._format_pct(volatility_snapshot.get("target_margin_ratio")),
+                            self._format_pct(self._get_display_target_margin_ratio(volatility_snapshot)),
                         ),
                         self._format_html_line(
                             "Actual Leverage",
-                            f"{self._format_float(volatility_snapshot.get('target_effective_leverage'))}x",
+                            f"{self._format_float(self._get_display_target_effective_leverage(volatility_snapshot))}x",
                         ),
                         self._format_html_line("Target Amount", self._format_usdt(payload.get("target_notional_usdt"))),
                         self._format_html_line(

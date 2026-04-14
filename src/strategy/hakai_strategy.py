@@ -37,10 +37,12 @@ from src.infra.env_loader import get_binance_credentials
 from src.infra.logger import format_log_details, get_logger
 from src.strategy.runtime_config import (
     DEFAULT_GEMINI_API_VERSION,
+    DEFAULT_INITIAL_POSITION_SIZE_RATIO,
     DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
     DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
     DEFAULT_POSITION_SIZE_RATIO_MAX,
     DEFAULT_POSITION_SIZE_RATIO_MIN,
+    DEFAULT_PROFIT_ACTIVATION_PCT,
     load_runtime_config,
 )
 
@@ -88,6 +90,21 @@ def _normalize_ratio(value: Any, default: float) -> float:
     if parsed is None or not math.isfinite(parsed) or parsed <= 0.0:
         parsed = default
     if 1.0 < parsed <= 100.0:
+        parsed /= 100.0
+    return float(parsed)
+
+
+def _normalize_activation_ratio(value: Any, default: float) -> float:
+    parsed_value = value
+    if isinstance(value, str):
+        parsed_value = value.strip()
+        if parsed_value.endswith("%"):
+            parsed_value = parsed_value[:-1]
+
+    parsed = _safe_float(parsed_value, default)
+    if parsed is None or not math.isfinite(parsed) or parsed <= 0.0:
+        parsed = default
+    if parsed >= 1.0 and parsed <= 100.0:
         parsed /= 100.0
     return float(parsed)
 
@@ -152,21 +169,25 @@ def _load_strategy_config() -> Dict[str, Any]:
         logger.warning("Forcing symbol=%s to BTCUSDT-only runtime", symbol)
         symbol = DEFAULT_SYMBOL
 
-    position_size_ratio_min = _normalize_ratio(
-        raw.get("position_size_ratio_min", DEFAULT_POSITION_SIZE_RATIO_MIN),
-        DEFAULT_POSITION_SIZE_RATIO_MIN,
+    initial_position_size_ratio = _normalize_ratio(
+        raw.get("initial_position_size_ratio", DEFAULT_INITIAL_POSITION_SIZE_RATIO),
+        DEFAULT_INITIAL_POSITION_SIZE_RATIO,
     )
     position_size_ratio_max = _normalize_ratio(
         raw.get("position_size_ratio_max", DEFAULT_POSITION_SIZE_RATIO_MAX),
         DEFAULT_POSITION_SIZE_RATIO_MAX,
     )
-    if position_size_ratio_max <= position_size_ratio_min:
+    profit_activation_pct = _normalize_activation_ratio(
+        raw.get("profit_activation_pct", DEFAULT_PROFIT_ACTIVATION_PCT),
+        DEFAULT_PROFIT_ACTIVATION_PCT,
+    )
+    if position_size_ratio_max <= initial_position_size_ratio:
         logger.warning(
-            "Invalid position size ratio bounds min=%s max=%s; using defaults",
-            raw.get("position_size_ratio_min"),
+            "Invalid position size ratio bounds initial=%s max=%s; using defaults",
+            raw.get("initial_position_size_ratio"),
             raw.get("position_size_ratio_max"),
         )
-        position_size_ratio_min = DEFAULT_POSITION_SIZE_RATIO_MIN
+        initial_position_size_ratio = DEFAULT_INITIAL_POSITION_SIZE_RATIO
         position_size_ratio_max = DEFAULT_POSITION_SIZE_RATIO_MAX
 
     return {
@@ -184,7 +205,8 @@ def _load_strategy_config() -> Dict[str, Any]:
             raw.get("position_sizing_live_window_hours", DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS),
             DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
         ),
-        "position_size_ratio_min": float(position_size_ratio_min),
+        "initial_position_size_ratio": float(initial_position_size_ratio),
+        "profit_activation_pct": float(profit_activation_pct),
         "position_size_ratio_max": float(position_size_ratio_max),
         "gemini_api_version": str(raw.get("gemini_api_version") or _DEFAULT_GEMINI_API_VERSION).strip()
         or _DEFAULT_GEMINI_API_VERSION,
@@ -627,7 +649,6 @@ def _calculate_volatility_snapshot(
     live_window_candles: Sequence[Dict[str, Any]],
     live_window_hours: int,
     leverage: int,
-    position_size_ratio_min: float,
     position_size_ratio_max: float,
 ) -> Dict[str, Any]:
     resolved_daily_sample_days = max(1, int(daily_sample_days))
@@ -668,7 +689,7 @@ def _calculate_volatility_snapshot(
         context="live window position sizing snapshot",
     )
 
-    resolved_ratio_min = float(position_size_ratio_min)
+    resolved_ratio_min = float(DEFAULT_POSITION_SIZE_RATIO_MIN)
     resolved_ratio_max = float(position_size_ratio_max)
     if (
         not math.isfinite(resolved_ratio_min)
@@ -717,9 +738,11 @@ def _calculate_volatility_snapshot(
         "sample_lower_value": float(percentile_position["sample_lower_value"]),
         "sample_upper_value": float(percentile_position["sample_upper_value"]),
         "percentile_location": str(percentile_position["location"]),
-        "position_size_ratio_min": float(resolved_ratio_min),
+        "volatility_position_size_ratio_min": float(resolved_ratio_min),
         "position_size_ratio_max": float(resolved_ratio_max),
         "rank_interpolated_margin_ratio": float(unclamped_margin_ratio),
+        "volatility_target_margin_ratio": float(target_margin_ratio),
+        "volatility_target_effective_leverage": float(target_effective_leverage),
         "target_margin_ratio": float(target_margin_ratio),
         "target_effective_leverage": float(target_effective_leverage),
     }
@@ -739,13 +762,17 @@ def _format_percentile_sizing_summary(snapshot: Optional[Dict[str, Any]]) -> str
     live_range_log = _safe_float(payload.get("live_range_log"), None)
     rank_estimate = _safe_float(payload.get("percentile_rank_estimate"), None)
     sample_size = _safe_int(payload.get("sample_size"), 0)
-    target_margin_ratio = _safe_float(payload.get("target_margin_ratio"), None)
+    volatility_margin_ratio = _safe_float(
+        payload.get("volatility_target_margin_ratio"),
+        _safe_float(payload.get("target_margin_ratio"), None),
+    )
+    applied_margin_ratio = _safe_float(payload.get("applied_target_margin_ratio"), volatility_margin_ratio)
     location = str(payload.get("percentile_location") or "").strip().lower()
     if (
         live_range_log is None
         or rank_estimate is None
         or sample_size <= 0
-        or target_margin_ratio is None
+        or volatility_margin_ratio is None
     ):
         return "-"
 
@@ -760,8 +787,347 @@ def _format_percentile_sizing_summary(snapshot: Optional[Dict[str, Any]]) -> str
         f"24h ln={live_range_log:.4f} | "
         f"rank={rank_estimate:.1f}/{sample_size} | "
         f"{location_label} | "
-        f"final={target_margin_ratio * 100.0:.2f}%"
+        f"vol={volatility_margin_ratio * 100.0:.2f}% | "
+        f"final={applied_margin_ratio * 100.0:.2f}%"
     )
+
+
+def _empty_position_episode_state() -> Dict[str, Any]:
+    return {
+        "initial_entry_price": None,
+        "initial_entry_direction": None,
+        "position_sizing_unlocked": False,
+        "position_sizing_activated_at": None,
+    }
+
+
+def _normalize_position_episode_direction(value: Any) -> Optional[str]:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"long", "short"} else None
+
+
+def _normalize_position_episode_state(value: Any) -> Dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    initial_entry_price = _format_price(payload.get("initial_entry_price"))
+    initial_entry_direction = _normalize_position_episode_direction(payload.get("initial_entry_direction"))
+    if initial_entry_price is None or initial_entry_direction is None:
+        return _empty_position_episode_state()
+
+    activated_at = str(payload.get("position_sizing_activated_at") or "").strip() or None
+    position_sizing_unlocked = bool(payload.get("position_sizing_unlocked"))
+    if not position_sizing_unlocked:
+        activated_at = None
+
+    return {
+        "initial_entry_price": float(initial_entry_price),
+        "initial_entry_direction": initial_entry_direction,
+        "position_sizing_unlocked": position_sizing_unlocked,
+        "position_sizing_activated_at": activated_at,
+    }
+
+
+def _build_position_episode_state_from_position(position: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    metrics = calculate_position_metrics(position)
+    direction = _normalize_position_episode_direction(metrics.get("direction"))
+    entry_price = _format_price(metrics.get("entry_price"))
+    if direction is None or entry_price is None:
+        return _empty_position_episode_state()
+    return {
+        "initial_entry_price": float(entry_price),
+        "initial_entry_direction": direction,
+        "position_sizing_unlocked": False,
+        "position_sizing_activated_at": None,
+    }
+
+
+def _reconcile_position_episode_state(
+    *,
+    previous_state: Optional[Dict[str, Any]],
+    current_position: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    live_episode_state = _build_position_episode_state_from_position(current_position)
+    if live_episode_state["initial_entry_price"] is None:
+        return {
+            "position_episode_state": _empty_position_episode_state(),
+            "bootstrapped": False,
+        }
+
+    previous_episode_state = _normalize_position_episode_state(previous_state)
+    if (
+        previous_episode_state["initial_entry_price"] is None
+        or previous_episode_state["initial_entry_direction"] != live_episode_state["initial_entry_direction"]
+    ):
+        return {
+            "position_episode_state": live_episode_state,
+            "bootstrapped": True,
+        }
+
+    return {
+        "position_episode_state": dict(previous_episode_state),
+        "bootstrapped": False,
+    }
+
+
+def _calculate_directional_return_pct(
+    *,
+    direction: str,
+    entry_price: float,
+    current_price: float,
+) -> Optional[float]:
+    normalized_direction = _normalize_position_episode_direction(direction)
+    normalized_entry_price = _format_price(entry_price)
+    normalized_current_price = _format_price(current_price)
+    if (
+        normalized_direction is None
+        or normalized_entry_price is None
+        or normalized_current_price is None
+    ):
+        return None
+
+    if normalized_direction == "long":
+        return float((normalized_current_price / normalized_entry_price) - 1.0)
+    return float((normalized_entry_price - normalized_current_price) / normalized_entry_price)
+
+
+def _resolve_profit_activation_price(
+    *,
+    direction: str,
+    entry_price: float,
+    profit_activation_pct: float,
+) -> Optional[float]:
+    normalized_direction = _normalize_position_episode_direction(direction)
+    normalized_entry_price = _format_price(entry_price)
+    normalized_profit_activation_pct = _normalize_optional_ratio(profit_activation_pct)
+    if (
+        normalized_direction is None
+        or normalized_entry_price is None
+        or normalized_profit_activation_pct is None
+    ):
+        return None
+
+    if normalized_direction == "long":
+        return float(normalized_entry_price * (1.0 + normalized_profit_activation_pct))
+    return float(normalized_entry_price * (1.0 - normalized_profit_activation_pct))
+
+
+def _update_position_episode_unlock_state(
+    *,
+    position_episode_state: Any,
+    current_position: Optional[Dict[str, Any]],
+    reference_price: float,
+    profit_activation_pct: float,
+) -> Dict[str, Any]:
+    normalized_state = _normalize_position_episode_state(position_episode_state)
+    if normalized_state["initial_entry_price"] is None or normalized_state["position_sizing_unlocked"]:
+        return normalized_state
+
+    metrics = calculate_position_metrics(current_position)
+    current_direction = _normalize_position_episode_direction(metrics.get("direction"))
+    if current_direction != normalized_state["initial_entry_direction"]:
+        return normalized_state
+
+    current_return_pct = _calculate_directional_return_pct(
+        direction=current_direction,
+        entry_price=normalized_state["initial_entry_price"],
+        current_price=reference_price,
+    )
+    if current_return_pct is None or current_return_pct < float(profit_activation_pct):
+        return normalized_state
+
+    unlocked_state = dict(normalized_state)
+    unlocked_state["position_sizing_unlocked"] = True
+    unlocked_state["position_sizing_activated_at"] = _current_time_utc().isoformat()
+    return unlocked_state
+
+
+def _build_position_sizing_plan(
+    *,
+    volatility_snapshot: Dict[str, Any],
+    current_position: Optional[Dict[str, Any]],
+    decision: str,
+    reference_price: float,
+    leverage: int,
+    initial_position_size_ratio: float,
+    position_size_ratio_max: float,
+    profit_activation_pct: float,
+    position_episode_state: Any,
+    bootstrap_protected: bool,
+) -> Dict[str, Any]:
+    normalized_decision = _normalize_ai_decision(decision)
+    if normalized_decision not in _DIRECTIONAL_AI_DECISIONS:
+        raise ValueError("decision must be LONG or SHORT for sizing")
+
+    volatility_margin_ratio = _safe_float(
+        volatility_snapshot.get("volatility_target_margin_ratio"),
+        _safe_float(volatility_snapshot.get("target_margin_ratio"), None),
+    )
+    if volatility_margin_ratio is None:
+        raise ValueError("volatility snapshot is missing target margin ratio")
+
+    desired_direction = "long" if normalized_decision == "LONG" else "short"
+    current_metrics = calculate_position_metrics(current_position)
+    current_direction = _normalize_position_episode_direction(current_metrics.get("direction"))
+    current_notional_usdt = abs(_safe_float(current_metrics.get("position_value"), 0.0) or 0.0)
+    normalized_episode_state = _normalize_position_episode_state(position_episode_state)
+
+    activation_price = None
+    current_return_pct = None
+    if (
+        normalized_episode_state["initial_entry_price"] is not None
+        and normalized_episode_state["initial_entry_direction"] == desired_direction
+    ):
+        activation_price = _resolve_profit_activation_price(
+            direction=desired_direction,
+            entry_price=normalized_episode_state["initial_entry_price"],
+            profit_activation_pct=profit_activation_pct,
+        )
+        current_return_pct = _calculate_directional_return_pct(
+            direction=desired_direction,
+            entry_price=normalized_episode_state["initial_entry_price"],
+            current_price=reference_price,
+        )
+
+    keep_current_position_size = bool(
+        bootstrap_protected
+        and current_direction in {"long", "short"}
+        and current_direction == desired_direction
+    )
+    is_same_direction_position = current_direction in {"long", "short"} and current_direction == desired_direction
+    unlocked = bool(normalized_episode_state["position_sizing_unlocked"])
+
+    if not is_same_direction_position:
+        applied_margin_ratio = float(initial_position_size_ratio)
+        position_sizing_mode = (
+            "reversal_initial_fixed" if current_direction in {"long", "short"} else "initial_entry_fixed"
+        )
+    elif keep_current_position_size:
+        applied_margin_ratio = float(initial_position_size_ratio)
+        position_sizing_mode = "bootstrap_hold"
+    elif unlocked:
+        applied_margin_ratio = max(float(initial_position_size_ratio), float(volatility_margin_ratio))
+        position_sizing_mode = (
+            "volatility_unlocked"
+            if applied_margin_ratio > float(initial_position_size_ratio)
+            else "volatility_unlocked_floor"
+        )
+    else:
+        applied_margin_ratio = float(initial_position_size_ratio)
+        position_sizing_mode = "profit_gate_locked"
+
+    applied_margin_ratio = min(
+        max(float(applied_margin_ratio), float(initial_position_size_ratio)),
+        float(position_size_ratio_max),
+    )
+    return {
+        "desired_direction": desired_direction,
+        "current_direction": current_direction,
+        "current_notional_usdt": float(current_notional_usdt),
+        "volatility_target_margin_ratio": float(volatility_margin_ratio),
+        "applied_target_margin_ratio": float(applied_margin_ratio),
+        "applied_target_effective_leverage": float(applied_margin_ratio * float(leverage)),
+        "initial_position_size_ratio": float(initial_position_size_ratio),
+        "position_size_ratio_max": float(position_size_ratio_max),
+        "profit_activation_pct": float(profit_activation_pct),
+        "position_sizing_mode": position_sizing_mode,
+        "position_sizing_unlocked": unlocked,
+        "position_sizing_activation_price": activation_price,
+        "position_sizing_current_return_pct": current_return_pct,
+        "keep_current_position_size": keep_current_position_size,
+        "bootstrap_protected": bool(bootstrap_protected),
+    }
+
+
+def _annotate_volatility_snapshot_with_position_sizing(
+    *,
+    volatility_snapshot: Dict[str, Any],
+    position_sizing_plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    annotated_snapshot = dict(volatility_snapshot or {})
+    volatility_margin_ratio = _safe_float(
+        annotated_snapshot.get("volatility_target_margin_ratio"),
+        _safe_float(annotated_snapshot.get("target_margin_ratio"), None),
+    )
+    volatility_effective_leverage = _safe_float(
+        annotated_snapshot.get("volatility_target_effective_leverage"),
+        _safe_float(annotated_snapshot.get("target_effective_leverage"), None),
+    )
+    if volatility_margin_ratio is not None:
+        annotated_snapshot["volatility_target_margin_ratio"] = float(volatility_margin_ratio)
+    if volatility_effective_leverage is not None:
+        annotated_snapshot["volatility_target_effective_leverage"] = float(volatility_effective_leverage)
+
+    applied_margin_ratio = _safe_float(position_sizing_plan.get("applied_target_margin_ratio"), None)
+    applied_effective_leverage = _safe_float(position_sizing_plan.get("applied_target_effective_leverage"), None)
+    if applied_margin_ratio is not None:
+        annotated_snapshot["applied_target_margin_ratio"] = float(applied_margin_ratio)
+        annotated_snapshot["target_margin_ratio"] = float(applied_margin_ratio)
+    if applied_effective_leverage is not None:
+        annotated_snapshot["applied_target_effective_leverage"] = float(applied_effective_leverage)
+        annotated_snapshot["target_effective_leverage"] = float(applied_effective_leverage)
+
+    for key in (
+        "initial_position_size_ratio",
+        "position_size_ratio_max",
+        "profit_activation_pct",
+        "position_sizing_mode",
+        "position_sizing_unlocked",
+        "position_sizing_activation_price",
+        "position_sizing_current_return_pct",
+        "keep_current_position_size",
+        "bootstrap_protected",
+        "current_notional_usdt",
+    ):
+        if key in position_sizing_plan:
+            annotated_snapshot[key] = position_sizing_plan.get(key)
+    return annotated_snapshot
+
+
+def _resolve_target_notional_usdt(
+    *,
+    account_equity: float,
+    leverage: int,
+    current_position: Optional[Dict[str, Any]],
+    position_sizing_plan: Dict[str, Any],
+) -> float:
+    if bool(position_sizing_plan.get("keep_current_position_size")):
+        current_notional_usdt = abs(_safe_float(position_sizing_plan.get("current_notional_usdt"), 0.0) or 0.0)
+        if current_notional_usdt > 0.0:
+            return float(current_notional_usdt)
+
+    return _calculate_target_notional(
+        account_equity=account_equity,
+        target_margin_ratio=float(position_sizing_plan["applied_target_margin_ratio"]),
+        leverage=leverage,
+    )
+
+
+def _resolve_post_trade_position_episode_state(
+    *,
+    previous_position_episode_state: Any,
+    previous_position: Optional[Dict[str, Any]],
+    current_position: Optional[Dict[str, Any]],
+    execution_action: Optional[str],
+) -> Dict[str, Any]:
+    current_episode_state = _build_position_episode_state_from_position(current_position)
+    if current_episode_state["initial_entry_price"] is None:
+        return _empty_position_episode_state()
+
+    previous_metrics = calculate_position_metrics(previous_position)
+    previous_direction = _normalize_position_episode_direction(previous_metrics.get("direction"))
+    current_direction = current_episode_state["initial_entry_direction"]
+    normalized_action = str(execution_action or "").strip()
+    is_new_episode = (
+        normalized_action in {"opened_new_position", "reversed_position"}
+        or previous_direction not in {"long", "short"}
+        or previous_direction != current_direction
+    )
+    if is_new_episode:
+        return current_episode_state
+
+    normalized_previous_state = _normalize_position_episode_state(previous_position_episode_state)
+    if normalized_previous_state["initial_entry_direction"] == current_direction:
+        return normalized_previous_state
+    return current_episode_state
 
 
 # Order planning and execution helpers.
@@ -1197,6 +1563,7 @@ def _build_state_update(
     ai_decision: Optional[str],
     next_trigger_down: Optional[float],
     next_trigger_up: Optional[float],
+    position_episode_state: Any = _STATE_UNSET,
     stop_risk_basis: Any = _STATE_UNSET,
 ) -> Dict[str, Any]:
     state_update = dict(previous_state or {})
@@ -1212,6 +1579,12 @@ def _build_state_update(
         state_update["next_trigger_down"] = next_trigger_down
     if next_trigger_up is not None:
         state_update["next_trigger_up"] = next_trigger_up
+    if position_episode_state is not _STATE_UNSET:
+        normalized_position_episode_state = _normalize_position_episode_state(position_episode_state)
+        state_update["initial_entry_price"] = normalized_position_episode_state["initial_entry_price"]
+        state_update["initial_entry_direction"] = normalized_position_episode_state["initial_entry_direction"]
+        state_update["position_sizing_unlocked"] = normalized_position_episode_state["position_sizing_unlocked"]
+        state_update["position_sizing_activated_at"] = normalized_position_episode_state["position_sizing_activated_at"]
     if stop_risk_basis is not _STATE_UNSET:
         normalized_stop_risk_basis = _normalize_stop_risk_basis(stop_risk_basis)
         state_update["stop_risk_basis"] = (
@@ -1226,6 +1599,7 @@ def _build_ai_state_update_from_reference_price(
     trigger_pct_usdt: float,
     reference_price: float,
     ai_decision: Optional[str],
+    position_episode_state: Any = _STATE_UNSET,
     stop_risk_basis: Any = _STATE_UNSET,
 ) -> Dict[str, Any]:
     next_levels = _build_trigger_levels(reference_price, trigger_pct_usdt)
@@ -1237,6 +1611,7 @@ def _build_ai_state_update_from_reference_price(
         ai_decision=ai_decision,
         next_trigger_down=next_levels["next_trigger_down"],
         next_trigger_up=next_levels["next_trigger_up"],
+        position_episode_state=position_episode_state,
         stop_risk_basis=stop_risk_basis,
     )
 
@@ -1640,6 +2015,9 @@ def run_hakai_cycle(
     symbol = str(config["symbol"])
     leverage = int(config["fixed_leverage"])
     trigger_pct_usdt = float(config["trigger_pct_usdt"])
+    initial_position_size_ratio = float(config["initial_position_size_ratio"])
+    position_size_ratio_max = float(config["position_size_ratio_max"])
+    profit_activation_pct = float(config["profit_activation_pct"])
     stop_loss_account_risk_pct = float(config["stop_loss_pct"])
     resolved_as_of_ms = _safe_int(as_of_ms, 0) or _current_time_ms()
     raw_previous_state = dict(state or {})
@@ -1648,6 +2026,8 @@ def run_hakai_cycle(
         trigger_pct_usdt,
     )
     state_stop_risk_basis = _normalize_stop_risk_basis(previous_state.get("stop_risk_basis"))
+    position_episode_state = _normalize_position_episode_state(previous_state)
+    position_episode_bootstrapped = False
 
     result: Dict[str, Any] = {
         "success": False,
@@ -1661,6 +2041,7 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=None,
             next_trigger_up=None,
+            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         ),
         "ai_triggered": False,
@@ -1674,6 +2055,7 @@ def run_hakai_cycle(
         "position": None,
         "position_before": None,
         "volatility_snapshot": None,
+        "position_sizing": None,
         "stop_risk_basis": dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None,
     }
     logger.debug(
@@ -1728,6 +2110,12 @@ def run_hakai_cycle(
     current_position = _extract_managed_position(positions, symbol)
     has_position = isinstance(current_position, dict)
     if has_position and current_position is not None:
+        episode_reconcile = _reconcile_position_episode_state(
+            previous_state=previous_state,
+            current_position=current_position,
+        )
+        position_episode_state = episode_reconcile["position_episode_state"]
+        position_episode_bootstrapped = bool(episode_reconcile["bootstrapped"])
         current_position_metrics = calculate_position_metrics(current_position)
         result["position"] = dict(current_position_metrics)
         result["position_before"] = dict(current_position_metrics)
@@ -1738,8 +2126,20 @@ def run_hakai_cycle(
             result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
             result["position_before"] = _enrich_position_with_stop_risk(result.get("position_before"), state_stop_risk_basis)
     else:
+        position_episode_state = _empty_position_episode_state()
         state_stop_risk_basis = None
         result["stop_risk_basis"] = None
+    result["state_update"] = _build_state_update(
+        previous_state=previous_state,
+        trigger_pct_usdt=trigger_pct_usdt,
+        ai_triggered=False,
+        trigger_price=None,
+        ai_decision=None,
+        next_trigger_down=None,
+        next_trigger_up=None,
+        position_episode_state=position_episode_state,
+        stop_risk_basis=state_stop_risk_basis,
+    )
     logger.debug(
         "Current managed position snapshot | %s",
         format_log_details(
@@ -1758,6 +2158,12 @@ def run_hakai_cycle(
         return result
 
     result["current_price"] = reference_price
+    position_episode_state = _update_position_episode_unlock_state(
+        position_episode_state=position_episode_state,
+        current_position=current_position,
+        reference_price=reference_price,
+        profit_activation_pct=profit_activation_pct,
+    )
 
     stop_sync_result: Optional[Dict[str, Any]] = None
     prefetched_account_equity: Optional[float] = None
@@ -1844,6 +2250,7 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         logger.debug(
@@ -1889,8 +2296,7 @@ def run_hakai_cycle(
         live_window_candles=market_context["live_window_candles"],
         live_window_hours=int(config["position_sizing_live_window_hours"]),
         leverage=leverage,
-        position_size_ratio_min=float(config["position_size_ratio_min"]),
-        position_size_ratio_max=float(config["position_size_ratio_max"]),
+        position_size_ratio_max=position_size_ratio_max,
     )
     result["volatility_snapshot"] = volatility_snapshot
     logger.info(
@@ -1962,6 +2368,7 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _emit_notification(
@@ -2040,15 +2447,35 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
         return result
 
-    target_notional_usdt = _calculate_target_notional(
-        account_equity=account_equity,
-        target_margin_ratio=float(volatility_snapshot["target_margin_ratio"]),
+    position_sizing_plan = _build_position_sizing_plan(
+        volatility_snapshot=volatility_snapshot,
+        current_position=current_position,
+        decision=ai_decision.decision,
+        reference_price=reference_price,
         leverage=leverage,
+        initial_position_size_ratio=initial_position_size_ratio,
+        position_size_ratio_max=position_size_ratio_max,
+        profit_activation_pct=profit_activation_pct,
+        position_episode_state=position_episode_state,
+        bootstrap_protected=position_episode_bootstrapped,
+    )
+    result["position_sizing"] = dict(position_sizing_plan)
+    volatility_snapshot = _annotate_volatility_snapshot_with_position_sizing(
+        volatility_snapshot=volatility_snapshot,
+        position_sizing_plan=position_sizing_plan,
+    )
+    result["volatility_snapshot"] = volatility_snapshot
+    target_notional_usdt = _resolve_target_notional_usdt(
+        account_equity=account_equity,
+        leverage=leverage,
+        current_position=current_position,
+        position_sizing_plan=position_sizing_plan,
     )
     result["account_equity"] = account_equity
     result["target_notional_usdt"] = target_notional_usdt
@@ -2061,6 +2488,7 @@ def run_hakai_cycle(
                 "target_margin_ratio": volatility_snapshot.get("target_margin_ratio"),
                 "target_effective_leverage": volatility_snapshot.get("target_effective_leverage"),
                 "target_notional_usdt": target_notional_usdt,
+                "position_sizing": position_sizing_plan,
                 "sizing_summary": _format_percentile_sizing_summary(volatility_snapshot),
             }
         ),
@@ -2077,6 +2505,7 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
@@ -2137,6 +2566,7 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
@@ -2193,6 +2623,19 @@ def run_hakai_cycle(
         state_stop_risk_basis = None
         result["stop_risk_basis"] = None
 
+    position_episode_state = _resolve_post_trade_position_episode_state(
+        previous_position_episode_state=position_episode_state,
+        previous_position=current_position,
+        current_position=(
+            synced_position
+            if synced_position is not None
+            else current_position
+            if execution_action in {"kept_position_size", "skipped_scale_in_below_min_notional"}
+            else None
+        ),
+        execution_action=execution_action,
+    )
+
     result["success"] = True
     result["action"] = execution_action
     result["state_update"] = _build_state_update(
@@ -2203,6 +2646,7 @@ def run_hakai_cycle(
         ai_decision=ai_decision.decision,
         next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
         next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+        position_episode_state=position_episode_state,
         stop_risk_basis=state_stop_risk_basis,
     )
 
@@ -2238,10 +2682,15 @@ def run_hourly_volatility_resize(
     symbol = str(config["symbol"])
     leverage = int(config["fixed_leverage"])
     trigger_pct_usdt = float(config["trigger_pct_usdt"])
+    initial_position_size_ratio = float(config["initial_position_size_ratio"])
+    position_size_ratio_max = float(config["position_size_ratio_max"])
+    profit_activation_pct = float(config["profit_activation_pct"])
     stop_loss_account_risk_pct = float(config["stop_loss_pct"])
     resolved_as_of_ms = _safe_int(as_of_ms, 0) or _current_time_ms()
     previous_state = dict(state or {})
     state_stop_risk_basis = _normalize_stop_risk_basis(previous_state.get("stop_risk_basis"))
+    position_episode_state = _normalize_position_episode_state(previous_state)
+    position_episode_bootstrapped = False
 
     result: Dict[str, Any] = {
         "success": False,
@@ -2261,6 +2710,7 @@ def run_hourly_volatility_resize(
         "account_equity": None,
         "target_notional_usdt": None,
         "execution": None,
+        "position_sizing": None,
         "state_update": _build_state_update(
             previous_state=previous_state,
             trigger_pct_usdt=trigger_pct_usdt,
@@ -2269,6 +2719,7 @@ def run_hourly_volatility_resize(
             ai_decision=None,
             next_trigger_down=None,
             next_trigger_up=None,
+            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         ),
         "stop_risk_basis": dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None,
@@ -2305,6 +2756,12 @@ def run_hourly_volatility_resize(
 
     current_position = _extract_managed_position(positions, symbol)
     if current_position is not None:
+        episode_reconcile = _reconcile_position_episode_state(
+            previous_state=previous_state,
+            current_position=current_position,
+        )
+        position_episode_state = episode_reconcile["position_episode_state"]
+        position_episode_bootstrapped = bool(episode_reconcile["bootstrapped"])
         current_position_metrics = calculate_position_metrics(current_position)
         result["position_before"] = dict(current_position_metrics)
         result["position"] = dict(current_position_metrics)
@@ -2318,8 +2775,20 @@ def run_hourly_volatility_resize(
             )
             result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
     else:
+        position_episode_state = _empty_position_episode_state()
         state_stop_risk_basis = None
         result["stop_risk_basis"] = None
+    result["state_update"] = _build_state_update(
+        previous_state=previous_state,
+        trigger_pct_usdt=trigger_pct_usdt,
+        ai_triggered=False,
+        trigger_price=None,
+        ai_decision=None,
+        next_trigger_down=None,
+        next_trigger_up=None,
+        position_episode_state=position_episode_state,
+        stop_risk_basis=state_stop_risk_basis,
+    )
 
     reference_price_payload = get_reference_price(symbol)
     reference_price = _format_price((reference_price_payload or {}).get("price"))
@@ -2327,6 +2796,12 @@ def run_hourly_volatility_resize(
         result["action"] = "reference_price_unavailable"
         return result
     result["current_price"] = reference_price
+    position_episode_state = _update_position_episode_unlock_state(
+        position_episode_state=position_episode_state,
+        current_position=current_position,
+        reference_price=reference_price,
+        profit_activation_pct=profit_activation_pct,
+    )
 
     market_context = _fetch_prompt_market_context(
         symbol=symbol,
@@ -2341,8 +2816,7 @@ def run_hourly_volatility_resize(
         live_window_candles=market_context["live_window_candles"],
         live_window_hours=int(config["position_sizing_live_window_hours"]),
         leverage=leverage,
-        position_size_ratio_min=float(config["position_size_ratio_min"]),
-        position_size_ratio_max=float(config["position_size_ratio_max"]),
+        position_size_ratio_max=position_size_ratio_max,
     )
     result["volatility_snapshot"] = volatility_snapshot
     hourly_trigger_window = _build_trigger_levels(reference_price, trigger_pct_usdt)
@@ -2425,6 +2899,7 @@ def run_hourly_volatility_resize(
         trigger_pct_usdt=trigger_pct_usdt,
         reference_price=reference_price,
         ai_decision=ai_decision.decision,
+        position_episode_state=position_episode_state,
         stop_risk_basis=state_stop_risk_basis,
     )
     result["ai_triggered"] = True
@@ -2456,10 +2931,29 @@ def run_hourly_volatility_resize(
         return result
     result["account_equity"] = account_equity
 
-    target_notional_usdt = _calculate_target_notional(
-        account_equity=account_equity,
-        target_margin_ratio=float(volatility_snapshot["target_margin_ratio"]),
+    position_sizing_plan = _build_position_sizing_plan(
+        volatility_snapshot=volatility_snapshot,
+        current_position=current_position,
+        decision=ai_decision.decision,
+        reference_price=reference_price,
         leverage=leverage,
+        initial_position_size_ratio=initial_position_size_ratio,
+        position_size_ratio_max=position_size_ratio_max,
+        profit_activation_pct=profit_activation_pct,
+        position_episode_state=position_episode_state,
+        bootstrap_protected=position_episode_bootstrapped,
+    )
+    result["position_sizing"] = dict(position_sizing_plan)
+    volatility_snapshot = _annotate_volatility_snapshot_with_position_sizing(
+        volatility_snapshot=volatility_snapshot,
+        position_sizing_plan=position_sizing_plan,
+    )
+    result["volatility_snapshot"] = volatility_snapshot
+    target_notional_usdt = _resolve_target_notional_usdt(
+        account_equity=account_equity,
+        leverage=leverage,
+        current_position=current_position,
+        position_sizing_plan=position_sizing_plan,
     )
     result["target_notional_usdt"] = target_notional_usdt
     logger.info(
@@ -2472,6 +2966,7 @@ def run_hourly_volatility_resize(
                 "target_margin_ratio": volatility_snapshot.get("target_margin_ratio"),
                 "target_effective_leverage": volatility_snapshot.get("target_effective_leverage"),
                 "target_notional_usdt": target_notional_usdt,
+                "position_sizing": position_sizing_plan,
                 "sizing_summary": _format_percentile_sizing_summary(volatility_snapshot),
             }
         ),
@@ -2561,11 +3056,24 @@ def run_hourly_volatility_resize(
         else:
             state_stop_risk_basis = None
             result["stop_risk_basis"] = None
+    position_episode_state = _resolve_post_trade_position_episode_state(
+        previous_position_episode_state=position_episode_state,
+        previous_position=current_position,
+        current_position=(
+            synced_position
+            if did_resize and synced_position is not None
+            else current_position
+            if result["action"] in {"kept_position_size", "skipped_scale_in_below_min_notional"}
+            else None
+        ),
+        execution_action=result.get("action"),
+    )
     result["state_update"] = _build_ai_state_update_from_reference_price(
         previous_state=previous_state,
         trigger_pct_usdt=trigger_pct_usdt,
         reference_price=reference_price,
         ai_decision=ai_decision.decision,
+        position_episode_state=position_episode_state,
         stop_risk_basis=state_stop_risk_basis,
     )
     _persist_cycle_output(result)

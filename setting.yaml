@@ -54,10 +54,14 @@ position_sizing_daily_sample_days: 25
 # Length of the recent 1-hour candle window used to measure current volatility.
 position_sizing_live_window_hours: 24
 
-# 25일 샘플 기준 rank 1은 2% 증거금 사용 비율에 대응합니다.
-# With the 25-day sample, rank 1 maps to a 2% margin usage ratio.
-position_size_ratio_min: 0.02
+# 최초 진입 또는 방향 전환 직후에 고정으로 사용할 증거금 비율입니다.
+# Fixed initial margin usage ratio applied on a fresh entry or immediately after a reversal.
+initial_position_size_ratio: 0.4
 
-# 25일 샘플 기준 rank 25는 98% 증거금 사용 비율에 대응합니다.
-# With the 25-day sample, rank 25 maps to a 98% margin usage ratio.
+# 최초 진입가 대비 이익이 이 비율 이상 누적되면 이후부터 변동성 기반 추가 포지션 사이징이 unlock 됩니다.
+# Volatility-based resizing unlocks only after price moves at least this far in profit from the initial entry price.
+profit_activation_pct: 0.01
+
+# unlock 이후 변동성 기반 추가 포지션 사이징이 도달할 수 있는 최대 증거금 비율입니다.
+# Maximum margin usage ratio available after the profit gate unlocks volatility-based resizing.
 position_size_ratio_max: 0.98
