@@ -273,12 +273,32 @@ class TradingScheduler:
         else:
             location_label = "in-range"
 
+        activation_price = payload.get("position_sizing_activation_price")
+        is_unlocked = bool(payload.get("position_sizing_unlocked"))
+        keep_current_position_size = bool(payload.get("keep_current_position_size"))
+        initial_position_size_ratio = payload.get("initial_position_size_ratio")
+        if keep_current_position_size:
+            status_text = "Bootstrap hold"
+        elif not is_unlocked and activation_price is not None:
+            status_text = f"Locked until {self._format_usdt(activation_price, digits=0)}"
+        else:
+            floor_kept = False
+            try:
+                floor_kept = float(target_margin_ratio) <= float(initial_position_size_ratio) + 1e-9
+            except (TypeError, ValueError):
+                floor_kept = False
+            status_text = (
+                f"Unlocked, floor {target_margin_ratio * 100.0:.2f}%"
+                if is_unlocked and floor_kept
+                else f"Final {target_margin_ratio * 100.0:.2f}%"
+            )
+
         return (
             f"24h ln {live_range_log:.4f} | "
             f"Rank {rank_estimate:.1f}/{sample_size} | "
             f"{location_label} | "
             f"Vol {volatility_margin_ratio * 100.0:.2f}% | "
-            f"Final {target_margin_ratio * 100.0:.2f}%"
+            f"{status_text}"
         )
 
     def _clip_text(self, value: Any, *, limit: int) -> str:
