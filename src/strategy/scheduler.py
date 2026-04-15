@@ -145,6 +145,8 @@ class TradingScheduler:
             "next_trigger_up": None,
             "initial_entry_price": None,
             "initial_entry_direction": None,
+            "position_sizing_activation_pct": None,
+            "position_sizing_activation_price": None,
             "position_sizing_unlocked": False,
             "position_sizing_activated_at": None,
             "stop_risk_basis": None,
@@ -176,6 +178,8 @@ class TradingScheduler:
                         merged["next_trigger_up"] = None
                         merged["initial_entry_price"] = None
                         merged["initial_entry_direction"] = None
+                        merged["position_sizing_activation_pct"] = None
+                        merged["position_sizing_activation_price"] = None
                         merged["position_sizing_unlocked"] = False
                         merged["position_sizing_activated_at"] = None
                     merged.pop("last_ai_trigger_round_price", None)
@@ -278,15 +282,25 @@ class TradingScheduler:
             location_label = "in-range"
 
         activation_price = payload.get("position_sizing_activation_price")
+        activation_pct = payload.get("position_sizing_activation_pct")
         is_unlocked = bool(payload.get("position_sizing_unlocked"))
         keep_current_position_size = bool(payload.get("keep_current_position_size"))
         initial_position_size_ratio = payload.get("initial_position_size_ratio")
         if keep_current_position_size:
             status_text = "Bootstrap hold"
         elif not is_unlocked and activation_price is not None:
+            locked_until_text = f"Locked until {self._format_usdt(activation_price, digits=0)}"
+            try:
+                if activation_pct is not None:
+                    locked_until_text = (
+                        f"Locked {float(activation_pct) * 100.0:.2f}% until "
+                        f"{self._format_usdt(activation_price, digits=0)}"
+                    )
+            except (TypeError, ValueError):
+                locked_until_text = f"Locked until {self._format_usdt(activation_price, digits=0)}"
             status_text = (
                 f"Final {target_margin_ratio * 100.0:.2f}% "
-                f"(Locked until {self._format_usdt(activation_price, digits=0)})"
+                f"({locked_until_text})"
             )
         else:
             floor_kept = False

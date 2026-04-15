@@ -257,6 +257,45 @@ def _calculate_log_high_low_ratio(*, high: Any, low: Any, context: str) -> float
     return float(log_ratio)
 
 
+def _calculate_high_low_midpoint_range_pct(*, high: Any, low: Any, context: str) -> float:
+    high_value = _format_price(high)
+    low_value = _format_price(low)
+    if high_value is None or low_value is None:
+        raise ValueError(f"{context} contains invalid high/low values")
+    if high_value < low_value:
+        raise ValueError(f"{context} high is below low")
+
+    midpoint = (float(high_value) + float(low_value)) / 2.0
+    if not math.isfinite(midpoint) or midpoint <= 0.0:
+        raise ValueError(f"{context} midpoint(high, low) is invalid")
+
+    range_pct = (float(high_value) - float(low_value)) / midpoint
+    if not math.isfinite(range_pct) or range_pct < 0.0:
+        raise ValueError(f"{context} midpoint range pct is invalid")
+    return float(range_pct)
+
+
+def _calculate_max_single_candle_range_pct(
+    candles: Sequence[Dict[str, Any]],
+    *,
+    context: str,
+) -> float:
+    relevant_candles = list(candles or [])
+    if not relevant_candles:
+        raise ValueError(f"{context} requires at least one candle")
+
+    max_range_pct = 0.0
+    for index, candle in enumerate(relevant_candles):
+        candle_range_pct = _calculate_high_low_midpoint_range_pct(
+            high=candle.get("high"),
+            low=candle.get("low"),
+            context=f"{context} candle[{index}]",
+        )
+        max_range_pct = max(float(max_range_pct), float(candle_range_pct))
+
+    return float(max_range_pct)
+
+
 def _normalize_ai_decision(value: Any) -> Optional[str]:
     normalized = str(value or "").strip().upper()
     if normalized in _VALID_AI_DECISIONS:
@@ -498,6 +537,23 @@ def _fetch_prompt_market_context(
     }
 
 
+def _fetch_position_sizing_live_window_candles(
+    *,
+    symbol: str,
+    live_window_hours: int,
+    as_of_ms: Optional[int],
+) -> list[Dict[str, Any]]:
+    resolved_live_window_hours = max(1, int(live_window_hours))
+    resolved_as_of_ms = _resolve_as_of_ms(as_of_ms)
+    raw_klines = fetch_klines(symbol, "1h", resolved_live_window_hours, as_of_ms=resolved_as_of_ms)
+    candles = parse_klines(raw_klines)
+    if len(candles) < resolved_live_window_hours:
+        raise ValueError(
+            f"not enough candles for {symbol} 1h lock threshold: have={len(candles)} need={resolved_live_window_hours}"
+        )
+    return candles[-resolved_live_window_hours:]
+
+
 def _fetch_live_prompt_position_snapshot(
     *,
     api_key: str,
@@ -660,6 +716,11 @@ def _calculate_volatility_snapshot(
     if len(relevant_live_window_candles) < resolved_live_window_hours:
         raise ValueError("not enough 1h candles for live window calculation")
 
+    max_single_candle_range_pct = _calculate_max_single_candle_range_pct(
+        relevant_live_window_candles,
+        context="live window activation threshold",
+    )
+
     daily_log_samples = sorted(
         _calculate_log_high_low_ratio(
             high=candle.get("high"),
@@ -730,6 +791,7 @@ def _calculate_volatility_snapshot(
         "live_range_high": float(live_range_high),
         "live_range_low": float(live_range_low),
         "live_range_log": float(live_range_log),
+        "live_window_max_single_candle_range_pct": float(max_single_candle_range_pct),
         "raw_percentile": raw_percentile,
         "percentile_rank_estimate": rank_estimate,
         "percentile_rank_floor": int(percentile_position["rank_floor"]),
@@ -796,6 +858,8 @@ def _empty_position_episode_state() -> Dict[str, Any]:
     return {
         "initial_entry_price": None,
         "initial_entry_direction": None,
+        "position_sizing_activation_pct": None,
+        "position_sizing_activation_price": None,
         "position_sizing_unlocked": False,
         "position_sizing_activated_at": None,
     }
@@ -813,6 +877,23 @@ def _normalize_position_episode_state(value: Any) -> Dict[str, Any]:
     if initial_entry_price is None or initial_entry_direction is None:
         return _empty_position_episode_state()
 
+    activation_pct = _normalize_optional_ratio(payload.get("position_sizing_activation_pct"))
+    activation_price = _format_price(payload.get("position_sizing_activation_price"))
+    if activation_pct is None and activation_price is not None:
+        derived_activation_pct = _calculate_directional_return_pct(
+            direction=initial_entry_direction,
+            entry_price=initial_entry_price,
+            current_price=activation_price,
+        )
+        if derived_activation_pct is not None and derived_activation_pct > 0.0:
+            activation_pct = float(derived_activation_pct)
+    if activation_price is None and activation_pct is not None:
+        activation_price = _resolve_profit_activation_price(
+            direction=initial_entry_direction,
+            entry_price=initial_entry_price,
+            profit_activation_pct=activation_pct,
+        )
+
     activated_at = str(payload.get("position_sizing_activated_at") or "").strip() or None
     position_sizing_unlocked = bool(payload.get("position_sizing_unlocked"))
     if not position_sizing_unlocked:
@@ -821,6 +902,8 @@ def _normalize_position_episode_state(value: Any) -> Dict[str, Any]:
     return {
         "initial_entry_price": float(initial_entry_price),
         "initial_entry_direction": initial_entry_direction,
+        "position_sizing_activation_pct": float(activation_pct) if activation_pct is not None else None,
+        "position_sizing_activation_price": float(activation_price) if activation_price is not None else None,
         "position_sizing_unlocked": position_sizing_unlocked,
         "position_sizing_activated_at": activated_at,
     }
@@ -835,6 +918,8 @@ def _build_position_episode_state_from_position(position: Optional[Dict[str, Any
     return {
         "initial_entry_price": float(entry_price),
         "initial_entry_direction": direction,
+        "position_sizing_activation_pct": None,
+        "position_sizing_activation_price": None,
         "position_sizing_unlocked": False,
         "position_sizing_activated_at": None,
     }
@@ -910,6 +995,99 @@ def _resolve_profit_activation_price(
     return float(normalized_entry_price * (1.0 - normalized_profit_activation_pct))
 
 
+def _resolve_position_sizing_activation_pct(
+    *,
+    position_episode_state: Any,
+    fallback_profit_activation_pct: float,
+) -> Optional[float]:
+    normalized_state = _normalize_position_episode_state(position_episode_state)
+    stored_activation_pct = _normalize_optional_ratio(normalized_state.get("position_sizing_activation_pct"))
+    if stored_activation_pct is not None:
+        return float(stored_activation_pct)
+
+    fallback_activation_pct = _normalize_optional_ratio(fallback_profit_activation_pct)
+    return float(fallback_activation_pct) if fallback_activation_pct is not None else None
+
+
+def _resolve_position_sizing_activation_price(
+    *,
+    position_episode_state: Any,
+    fallback_profit_activation_pct: float,
+) -> Optional[float]:
+    normalized_state = _normalize_position_episode_state(position_episode_state)
+    stored_activation_price = _format_price(normalized_state.get("position_sizing_activation_price"))
+    if stored_activation_price is not None:
+        return float(stored_activation_price)
+
+    activation_pct = _resolve_position_sizing_activation_pct(
+        position_episode_state=normalized_state,
+        fallback_profit_activation_pct=fallback_profit_activation_pct,
+    )
+    if (
+        normalized_state["initial_entry_price"] is None
+        or normalized_state["initial_entry_direction"] not in {"long", "short"}
+        or activation_pct is None
+    ):
+        return None
+
+    return _resolve_profit_activation_price(
+        direction=normalized_state["initial_entry_direction"],
+        entry_price=normalized_state["initial_entry_price"],
+        profit_activation_pct=activation_pct,
+    )
+
+
+def _refresh_position_episode_lock_threshold(
+    *,
+    position_episode_state: Any,
+    profit_activation_pct: float,
+    live_window_candles: Optional[Sequence[Dict[str, Any]]] = None,
+    live_window_hours: Optional[int] = None,
+) -> Dict[str, Any]:
+    normalized_state = _normalize_position_episode_state(position_episode_state)
+    if normalized_state["initial_entry_price"] is None or normalized_state["position_sizing_unlocked"]:
+        return normalized_state
+
+    configured_activation_floor_pct = _normalize_optional_ratio(profit_activation_pct)
+    stored_activation_pct = _normalize_optional_ratio(normalized_state.get("position_sizing_activation_pct"))
+    resolved_activation_pct = (
+        float(configured_activation_floor_pct)
+        if configured_activation_floor_pct is not None
+        else float(stored_activation_pct)
+        if stored_activation_pct is not None
+        else None
+    )
+    if resolved_activation_pct is None:
+        return normalized_state
+
+    if live_window_candles is not None:
+        resolved_live_window_hours = max(1, int(live_window_hours or len(live_window_candles)))
+        relevant_live_window_candles = list(live_window_candles or [])[-resolved_live_window_hours:]
+        if len(relevant_live_window_candles) < resolved_live_window_hours:
+            raise ValueError("not enough 1h candles for profit activation threshold refresh")
+        live_window_max_single_candle_range_pct = _calculate_max_single_candle_range_pct(
+            relevant_live_window_candles,
+            context="profit activation threshold refresh",
+        )
+        resolved_activation_pct = max(
+            float(configured_activation_floor_pct)
+            if configured_activation_floor_pct is not None
+            else float(resolved_activation_pct),
+            float(live_window_max_single_candle_range_pct),
+        )
+    elif stored_activation_pct is not None:
+        resolved_activation_pct = float(stored_activation_pct)
+
+    refreshed_state = dict(normalized_state)
+    refreshed_state["position_sizing_activation_pct"] = float(resolved_activation_pct)
+    refreshed_state["position_sizing_activation_price"] = _resolve_profit_activation_price(
+        direction=normalized_state["initial_entry_direction"],
+        entry_price=normalized_state["initial_entry_price"],
+        profit_activation_pct=resolved_activation_pct,
+    )
+    return refreshed_state
+
+
 def _update_position_episode_unlock_state(
     *,
     position_episode_state: Any,
@@ -926,15 +1104,27 @@ def _update_position_episode_unlock_state(
     if current_direction != normalized_state["initial_entry_direction"]:
         return normalized_state
 
+    activation_pct = _resolve_position_sizing_activation_pct(
+        position_episode_state=normalized_state,
+        fallback_profit_activation_pct=profit_activation_pct,
+    )
+    if activation_pct is None:
+        return normalized_state
+
     current_return_pct = _calculate_directional_return_pct(
         direction=current_direction,
         entry_price=normalized_state["initial_entry_price"],
         current_price=reference_price,
     )
-    if current_return_pct is None or current_return_pct < float(profit_activation_pct):
+    if current_return_pct is None or current_return_pct < float(activation_pct):
         return normalized_state
 
     unlocked_state = dict(normalized_state)
+    unlocked_state["position_sizing_activation_pct"] = float(activation_pct)
+    unlocked_state["position_sizing_activation_price"] = _resolve_position_sizing_activation_price(
+        position_episode_state=normalized_state,
+        fallback_profit_activation_pct=profit_activation_pct,
+    )
     unlocked_state["position_sizing_unlocked"] = True
     unlocked_state["position_sizing_activated_at"] = _current_time_utc().isoformat()
     return unlocked_state
@@ -981,15 +1171,19 @@ def _build_position_sizing_plan(
     normalized_episode_state = _normalize_position_episode_state(position_episode_state)
 
     activation_price = None
+    activation_pct = None
     current_return_pct = None
     if (
         normalized_episode_state["initial_entry_price"] is not None
         and normalized_episode_state["initial_entry_direction"] == desired_direction
     ):
-        activation_price = _resolve_profit_activation_price(
-            direction=desired_direction,
-            entry_price=normalized_episode_state["initial_entry_price"],
-            profit_activation_pct=profit_activation_pct,
+        activation_pct = _resolve_position_sizing_activation_pct(
+            position_episode_state=normalized_episode_state,
+            fallback_profit_activation_pct=profit_activation_pct,
+        )
+        activation_price = _resolve_position_sizing_activation_price(
+            position_episode_state=normalized_episode_state,
+            fallback_profit_activation_pct=profit_activation_pct,
         )
         current_return_pct = _calculate_directional_return_pct(
             direction=desired_direction,
@@ -1038,6 +1232,7 @@ def _build_position_sizing_plan(
         "initial_position_size_ratio": float(initial_position_size_ratio),
         "position_size_ratio_max": float(position_size_ratio_max),
         "profit_activation_pct": float(profit_activation_pct),
+        "position_sizing_activation_pct": float(activation_pct) if activation_pct is not None else None,
         "position_sizing_mode": position_sizing_mode,
         "position_sizing_unlocked": unlocked,
         "position_sizing_activation_price": activation_price,
@@ -1079,6 +1274,7 @@ def _annotate_volatility_snapshot_with_position_sizing(
         "initial_position_size_ratio",
         "position_size_ratio_max",
         "profit_activation_pct",
+        "position_sizing_activation_pct",
         "position_sizing_mode",
         "position_sizing_unlocked",
         "position_sizing_activation_price",
@@ -1112,19 +1308,26 @@ def _build_pre_ai_display_volatility_snapshot(
     )
     unlocked = bool(normalized_episode_state["position_sizing_unlocked"])
     activation_price = None
+    activation_pct = None
     if (
         normalized_episode_state["initial_entry_price"] is not None
         and normalized_episode_state["initial_entry_direction"] in {"long", "short"}
     ):
-        activation_price = _resolve_profit_activation_price(
-            direction=normalized_episode_state["initial_entry_direction"],
-            entry_price=normalized_episode_state["initial_entry_price"],
-            profit_activation_pct=profit_activation_pct,
+        activation_pct = _resolve_position_sizing_activation_pct(
+            position_episode_state=normalized_episode_state,
+            fallback_profit_activation_pct=profit_activation_pct,
+        )
+        activation_price = _resolve_position_sizing_activation_price(
+            position_episode_state=normalized_episode_state,
+            fallback_profit_activation_pct=profit_activation_pct,
         )
 
     display_snapshot["initial_position_size_ratio"] = float(initial_position_size_ratio)
+    display_snapshot["profit_activation_pct"] = float(profit_activation_pct)
     display_snapshot["position_sizing_unlocked"] = unlocked
     display_snapshot["keep_current_position_size"] = keep_current_position_size
+    if activation_pct is not None:
+        display_snapshot["position_sizing_activation_pct"] = float(activation_pct)
     if activation_price is not None:
         display_snapshot["position_sizing_activation_price"] = activation_price
 
@@ -1637,6 +1840,8 @@ def _build_state_update(
         normalized_position_episode_state = _normalize_position_episode_state(position_episode_state)
         state_update["initial_entry_price"] = normalized_position_episode_state["initial_entry_price"]
         state_update["initial_entry_direction"] = normalized_position_episode_state["initial_entry_direction"]
+        state_update["position_sizing_activation_pct"] = normalized_position_episode_state["position_sizing_activation_pct"]
+        state_update["position_sizing_activation_price"] = normalized_position_episode_state["position_sizing_activation_price"]
         state_update["position_sizing_unlocked"] = normalized_position_episode_state["position_sizing_unlocked"]
         state_update["position_sizing_activated_at"] = normalized_position_episode_state["position_sizing_activated_at"]
     if stop_risk_basis is not _STATE_UNSET:
@@ -2232,6 +2437,34 @@ def run_hakai_cycle(
 
     result["current_price"] = reference_price
     position_episode_state_before_unlock = dict(position_episode_state)
+    if (
+        position_episode_state["initial_entry_price"] is not None
+        and not bool(position_episode_state["position_sizing_unlocked"])
+    ):
+        live_window_candles_for_lock_threshold: Optional[list[Dict[str, Any]]] = None
+        try:
+            live_window_candles_for_lock_threshold = _fetch_position_sizing_live_window_candles(
+                symbol=symbol,
+                live_window_hours=int(config["position_sizing_live_window_hours"]),
+                as_of_ms=resolved_as_of_ms,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh locked position sizing activation threshold; keeping prior threshold | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "error": str(exc),
+                    }
+                ),
+            )
+
+        position_episode_state = _refresh_position_episode_lock_threshold(
+            position_episode_state=position_episode_state,
+            profit_activation_pct=profit_activation_pct,
+            live_window_candles=live_window_candles_for_lock_threshold,
+            live_window_hours=int(config["position_sizing_live_window_hours"]),
+        )
     position_episode_state = _update_position_episode_unlock_state(
         position_episode_state=position_episode_state,
         current_position=current_position,
@@ -2731,6 +2964,12 @@ def run_hakai_cycle(
             else None
         ),
         execution_action=execution_action,
+    )
+    position_episode_state = _refresh_position_episode_lock_threshold(
+        position_episode_state=position_episode_state,
+        profit_activation_pct=profit_activation_pct,
+        live_window_candles=market_context.get("live_window_candles"),
+        live_window_hours=int(config["position_sizing_live_window_hours"]),
     )
 
     result["success"] = True

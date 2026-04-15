@@ -58,8 +58,8 @@ position_sizing_live_window_hours: 24
 # Fixed initial margin usage ratio applied on a fresh entry or immediately after a reversal.
 initial_position_size_ratio: 0.4
 
-# 최초 진입가 대비 이익이 이 비율 이상 누적되면 이후부터 변동성 기반 추가 포지션 사이징이 unlock 됩니다.
-# Volatility-based resizing unlocks only after price moves at least this far in profit from the initial entry price.
+# 최초 진입가 기준 unlock 최소 퍼센트입니다. 실제 unlock 기준은 이 값과 최근 24개 1시간봉 중 최대 단일봉 변동폭(high-low)/(midpoint) 중 더 큰 값으로 lock 상태에서 계속 갱신됩니다.
+# Minimum profit unlock floor from the initial entry price. While still locked, the runtime keeps using the larger of this value and the biggest single-candle 1h range pct from the latest 24-hour window.
 profit_activation_pct: 0.01
 
 # unlock 이후 변동성 기반 추가 포지션 사이징이 도달할 수 있는 최대 증거금 비율입니다.
