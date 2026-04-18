@@ -59,6 +59,8 @@ _SUPPORTED_GEMINI_THINKING_LEVELS = {"minimal", "low", "medium", "high"}
 _DEFAULT_GEMINI_THINKING_LEVEL = "high"
 _DEFAULT_GEMINI_API_VERSION = DEFAULT_GEMINI_API_VERSION
 _TRIGGER_PRICE_DIGITS = 2
+_INITIAL_ENTRY_VOLATILITY_COOLDOWN_THRESHOLD_PCT = 0.01
+_INITIAL_ENTRY_VOLATILITY_COOLDOWN_CANDLE_COUNT = 2
 NotificationCallback = Optional[Callable[[str, Dict[str, Any]], None]]
 _DIRECTIONAL_AI_DECISIONS = {"LONG", "SHORT"}
 _VALID_AI_DECISIONS = set(_DIRECTIONAL_AI_DECISIONS)
@@ -552,6 +554,63 @@ def _fetch_position_sizing_live_window_candles(
             f"not enough candles for {symbol} 1h lock threshold: have={len(candles)} need={resolved_live_window_hours}"
         )
     return candles[-resolved_live_window_hours:]
+
+
+def _evaluate_initial_entry_volatility_cooldown(
+    *,
+    symbol: str,
+    as_of_ms: Optional[int],
+    threshold_pct: float = _INITIAL_ENTRY_VOLATILITY_COOLDOWN_THRESHOLD_PCT,
+) -> Dict[str, Any]:
+    resolved_as_of_ms = _resolve_as_of_ms(as_of_ms)
+    raw_klines = fetch_klines(
+        symbol,
+        "1h",
+        _INITIAL_ENTRY_VOLATILITY_COOLDOWN_CANDLE_COUNT,
+        as_of_ms=resolved_as_of_ms,
+    )
+    candles = parse_klines(raw_klines)
+    if len(candles) < _INITIAL_ENTRY_VOLATILITY_COOLDOWN_CANDLE_COUNT:
+        raise ValueError(
+            f"not enough 1h candles for initial-entry volatility cooldown: have={len(candles)} "
+            f"need={_INITIAL_ENTRY_VOLATILITY_COOLDOWN_CANDLE_COUNT}"
+        )
+
+    relevant_candles = candles[-_INITIAL_ENTRY_VOLATILITY_COOLDOWN_CANDLE_COUNT:]
+    candle_labels = ("previous_1h", "current_1h")
+    cooldown_candles: list[Dict[str, Any]] = []
+    breached_labels: list[str] = []
+    max_range_pct = 0.0
+
+    for candle_label, candle in zip(candle_labels, relevant_candles):
+        range_pct = _calculate_high_low_midpoint_range_pct(
+            high=candle.get("high"),
+            low=candle.get("low"),
+            context=f"initial entry volatility cooldown {candle_label}",
+        )
+        max_range_pct = max(float(max_range_pct), float(range_pct))
+        if float(range_pct) > float(threshold_pct):
+            breached_labels.append(candle_label)
+
+        cooldown_candles.append(
+            {
+                "label": candle_label,
+                "timestamp": _safe_int(candle.get("timestamp"), 0),
+                "open": _format_price(candle.get("open")),
+                "high": _format_price(candle.get("high")),
+                "low": _format_price(candle.get("low")),
+                "close": _format_price(candle.get("close")),
+                "range_pct": float(range_pct),
+            }
+        )
+
+    return {
+        "threshold_pct": float(threshold_pct),
+        "cooldown_active": bool(breached_labels),
+        "breached_candle_labels": breached_labels,
+        "max_range_pct": float(max_range_pct),
+        "candles": cooldown_candles,
+    }
 
 
 def _fetch_live_prompt_position_snapshot(
@@ -2589,6 +2648,41 @@ def run_hakai_cycle(
             ),
         )
         return result
+
+    if current_position is None:
+        initial_entry_volatility_cooldown = _evaluate_initial_entry_volatility_cooldown(
+            symbol=symbol,
+            as_of_ms=resolved_as_of_ms,
+        )
+        result["initial_entry_volatility_cooldown"] = initial_entry_volatility_cooldown
+        if bool(initial_entry_volatility_cooldown.get("cooldown_active")):
+            result["success"] = True
+            result["action"] = "hold_volatility_cooldown"
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=False,
+                trigger_price=None,
+                ai_decision=None,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                position_episode_state=position_episode_state,
+                stop_risk_basis=state_stop_risk_basis,
+            )
+            logger.info(
+                "Initial entry paused by 1h volatility cool down | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "current_price": reference_price,
+                        "trigger_reason": trigger_info.get("reason"),
+                        "threshold_pct": initial_entry_volatility_cooldown.get("threshold_pct"),
+                        "max_range_pct": initial_entry_volatility_cooldown.get("max_range_pct"),
+                        "breached_candles": initial_entry_volatility_cooldown.get("breached_candle_labels"),
+                    }
+                ),
+            )
+            return result
 
     cycle_dir = _create_cycle_dir()
     result["cycle_dir"] = cycle_dir

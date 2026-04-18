@@ -38,6 +38,7 @@ ACTION_LABELS = {
     "init": "Initialized",
     "hold_waiting_round_trigger": "Waiting for next round",
     "hold_waiting_price_trigger": "Waiting for next price level",
+    "hold_volatility_cooldown": "Initial entry paused by 1h volatility cool down",
     "hold_stop_updated": "Position kept, stop updated",
     "opened_new_position": "Opened new position",
     "scaled_in_position": "Scaled in position",
@@ -531,6 +532,8 @@ class TradingScheduler:
             return "Skipped because the AI cycle already resized."
         if action == "hourly_resize_skipped_no_position":
             return "Skipped because there was no open position."
+        if action == "hold_volatility_cooldown":
+            return "Initial entry stayed paused by the 1h volatility cool down."
         if not bool(resize.get("success")):
             return f"Failed ({action or 'unknown'})."
         return f"{self._humanize_code_label(action).capitalize()}{direction_suffix}."
@@ -842,6 +845,7 @@ class TradingScheduler:
                     self._format_html_title("Current Account", emoji="📌"),
                     [
                         self._format_html_line("Position", self._format_position_summary(payload.get("position"))),
+                        self._format_html_line("Status", self._translate_action(payload.get("action"))),
                         self._format_html_line(
                             "AI Direction",
                             payload.get("last_ai_decision") or payload.get("ai_decision") or "None",
@@ -914,7 +918,11 @@ class TradingScheduler:
         if (
             bool(result.get("ai_triggered"))
             or not bool(result.get("success"))
-            or str(result.get("action")) not in {"hold_waiting_price_trigger", "hold_waiting_round_trigger"}
+            or str(result.get("action")) not in {
+                "hold_waiting_price_trigger",
+                "hold_waiting_round_trigger",
+                "hold_volatility_cooldown",
+            }
         ):
             cycle_payload = dict(result)
             cycle_payload["timestamp"] = cycle_time.isoformat()
