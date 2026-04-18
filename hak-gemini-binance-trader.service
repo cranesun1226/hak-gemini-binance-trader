@@ -1,0 +1,18 @@
+[Unit]
+Description=HAK GEMINI BINANCE TRADER
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/hak-gemini-binance-trader
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/hak-gemini-binance-trader/venv/bin/python -u /root/hak-gemini-binance-trader/main.py
+Restart=always
+RestartSec=15
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
