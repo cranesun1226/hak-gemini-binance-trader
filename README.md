@@ -13,9 +13,9 @@ HAK GEMINI BINANCE TRADER is an automated BTC/USDT futures trading system develo
 
 ## Research Thesis | 연구 가설과 자동화 우위
 
-이 시스템은 "LLM에게 모든 것을 맡기지 않는다"는 연구 결론 위에 설계되었습니다. 여러 실험 끝에 가장 좋은 결과를 낸 방식은 LLM에게 포지션 크기, 리스크 관리, 주문 실행까지 맡기는 것이 아니라 오직 방향성 판단이라는 하나의 고부가가치 과제만 맡기는 구조였습니다. 그래서 Gemini 프롬프트는 평범한 노이즈 캔들에 흔들리지 않고, 멀티 타임프레임 구조에서 정말 중요한 캔들과 시장 구조만 보고 `LONG` 또는 `SHORT`만 반환하도록 설계되었습니다.
+이 시스템은 "LLM에게 모든 것을 맡기지 않는다"는 연구 결론 위에 설계되었습니다. 여러 실험 끝에 가장 좋은 결과를 낸 방식은 LLM에게 포지션 크기, 리스크 관리, 주문 실행까지 맡기는 것이 아니라 오직 방향성 판단이라는 하나의 고부가가치 과제만 맡기는 구조였습니다. 그래서 Gemini 프롬프트는 평범한 노이즈 캔들에 흔들리지 않고, 최근 100개의 1시간봉 전체 구조 안에서 정말 중요한 캔들과 시장 구조만 보고 `LONG` 또는 `SHORT`만 반환하도록 설계되었습니다.
 
-This system is built on a clear research conclusion: do not ask an LLM to do everything. After repeated experiments, the best results came from giving the model one high-value cognitive job only, directional judgment. That is why the Gemini prompt is intentionally strong and narrow: it is designed to ignore ordinary candle noise, focus on the dominant multi-timeframe structure, and return only a `LONG` or `SHORT` decision.
+This system is built on a clear research conclusion: do not ask an LLM to do everything. After repeated experiments, the best results came from giving the model one high-value cognitive job only, directional judgment. That is why the Gemini prompt is intentionally strong and narrow: it is designed to ignore ordinary candle noise, focus on the dominant structure inside the latest 100 one-hour candles, and return only a `LONG` or `SHORT` decision.
 
 포지션 사이징은 반대로 최대한 기계적이어야 했습니다. 크랜선이 직접 수행한 연구와 백테스트에서, 현재 최대 레버리지 10배 조건에서는 현재 변동성을 과거 변동성 분포와 비교해 익스포저를 정하는 방식이 가장 좋은 성과를 가져왔고, 이 저장소는 그 결론을 자동매매 로직으로 그대로 옮겼습니다. 즉 Gemini는 방향만 판단하고, 시스템은 현재 24시간 변동성을 과거 일봉 변동성 분포에 대입해 목표 증거금 비율과 실효 레버리지를 계산한 뒤 Binance Futures 제약에 맞는 수량 계산, 포지션 리밸런싱, 손절 동기화까지 자동으로 수행합니다.
 
@@ -35,7 +35,7 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 | Item | Description |
 | --- | --- |
 | Market Scope | BTCUSDT only, intentionally narrowed for operational clarity and safer execution scope. |
-| Decision Engine | Gemini returns a structured `LONG` or `SHORT` decision from multi-timeframe market context. |
+| Decision Engine | Gemini returns a structured `LONG` or `SHORT` decision from the latest 100 one-hour candles. |
 | Scheduler | A persistent scheduler manages cycle cadence, state, hourly reporting, and graceful shutdown. |
 | Risk Controls | Fixed leverage, exchange-aware quantity adjustment, min-notional checks, and account-risk-based stop-loss synchronization. |
 | Position Sizing | Fresh entries start at `0.4`, then volatility rank sizing can expand exposure after a profit unlock driven by `max(profit_activation_pct, latest 24h max 1h candle range)`. |
@@ -71,7 +71,7 @@ flowchart TD
     D --> E{AI trigger reached?}
     E -- No --> F[Keep position or wait for next trigger window]
     E -- Yes --> G[Create cycle artifact directory]
-    G --> H[Fetch 1d and 1h OHLCV market context]
+    G --> H[Fetch 100 recent 1h candles for AI and sizing samples]
     H --> I[Gemini structured LONG or SHORT decision]
     I --> J[Compute volatility-aware target exposure]
     J --> K[Open, reverse, scale in, or scale out position]
@@ -108,8 +108,8 @@ flowchart LR
 5. If neither a price trigger nor an unlock trigger is reached, the system updates state and exits the cycle without unnecessary AI cost.
    가격 트리거나 unlock 트리거가 모두 충족되지 않으면 상태만 갱신하고 AI 비용을 발생시키지 않은 채 사이클을 종료합니다.
 
-6. If the trigger is reached, the runtime creates a cycle directory and gathers 1-day and 1-hour OHLCV context.
-   트리거가 충족되면 사이클 디렉터리를 만들고 1일봉과 1시간봉 OHLCV 컨텍스트를 수집합니다.
+6. If the trigger is reached, the runtime creates a cycle directory, gathers the latest 100 one-hour candles for Gemini, and separately refreshes the sizing samples needed for volatility ranking.
+   트리거가 충족되면 사이클 디렉터리를 만들고 Gemini용 최근 100개 1시간봉을 수집한 뒤, 변동성 랭크 계산에 필요한 사이징 샘플을 별도로 갱신합니다.
 
 7. Gemini receives structured market context and returns a strict `LONG` or `SHORT` decision.
    Gemini는 구조화된 시장 컨텍스트를 받아 엄격한 `LONG` 또는 `SHORT` 결정을 반환합니다.
@@ -160,7 +160,7 @@ binance_bol_trader/
 | `src/strategy/hakai_strategy.py` | Core trading logic: trigger evaluation, AI cycle execution, volatility sizing, and result persistence. |
 | `src/ai/gemini_trader.py` | Builds Gemini prompts, validates structured responses, estimates token cost, and saves AI artifacts. |
 | `src/binance/trade_position.py` | Handles Binance Futures execution, leverage, position inspection, stop-loss sync, and exchange filters. |
-| `src/binance/market_data.py` | Fetches and normalizes multi-timeframe OHLCV data for AI input and sizing logic. |
+| `src/binance/market_data.py` | Fetches and normalizes OHLCV data for the 1-hour AI prompt and volatility sizing logic. |
 | `src/binance/binance_rate_limit.py` | Retry logic for transient Binance API failures, rate limits, and execution-unknown cases. |
 | `src/infra/env_loader.py` | Loads secrets and runtime environment variables from the environment or `.env`. |
 | `src/infra/logger.py` | Centralized root logger configuration and structured log formatting. |
@@ -229,7 +229,8 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 | `symbol` | Trading symbol. The current runtime intentionally supports only `BTCUSDT`. | `BTCUSDT` |
 | `cycle_interval_seconds` | Main scheduler cycle interval. | `60` |
 | `trigger_pct_usdt` | Percent move from the last AI trigger price required to request a new AI decision. | `0.4` |
-| `ai_candle_count_per_timeframe` | Number of recent candles per timeframe sent to the AI model. | `24` |
+| `ai_prompt_timeframe` | Timeframe sent to the AI model. The current runtime supports only `1h`. | `1h` |
+| `ai_prompt_candle_count` | Number of recent 1-hour candles sent to the AI model. | `100` |
 | `gemini_thinking_level` | Gemini reasoning level. Supported values: `minimal`, `low`, `medium`, `high`. | `high` |
 | `fixed_leverage` | Fixed leverage applied on entry and position sizing logic. | `10` |
 | `stop_loss_pct` | Account-level stop-loss risk ratio, converted into an entry-price stop distance from effective leverage. | `0.04` |

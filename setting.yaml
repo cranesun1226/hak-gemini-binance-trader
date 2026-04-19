@@ -22,9 +22,13 @@ trigger_pct_usdt: 0.4
 # AI 입력 및 추론 설정
 # AI Input & Reasoning
 # ================================================================================
-# 각 타임프레임(현재 1d, 1h)별로 AI 프롬프트에 포함할 최근 캔들 개수입니다.
-# Number of recent candles per timeframe, currently 1d and 1h, included in the AI prompt.
-ai_candle_count_per_timeframe: 24
+# AI 프롬프트에 전달할 타임프레임입니다. 현재 런타임은 1h만 지원합니다.
+# Timeframe delivered to the AI prompt. The current runtime supports only 1h.
+ai_prompt_timeframe: 1h
+
+# AI 프롬프트에 포함할 최근 1시간봉 개수입니다.
+# Number of recent 1-hour candles included in the AI prompt.
+ai_prompt_candle_count: 100
 
 # Gemini 추론 강도를 설정하며 minimal, low, medium, high 중 하나를 사용합니다.
 # Sets the Gemini reasoning level; use one of minimal, low, medium, or high.

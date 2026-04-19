@@ -346,16 +346,16 @@ def _build_direction_prompt(
     )
     current_position = str(payload.get("current_position") or "NONE")
     return (
-        "You are a disciplined BTCUSDT futures trader.\n"
-        f"Current Price:{reference_price}, Current Position: {current_position}\n"
+        "You are a world-best BTCUSDT futures trader.\n"
+        f"Current Price: {reference_price}, Current Position: {current_position}\n"
         "As a trader, rationally choose to hold or switch LONG/SHORT position. If Current Position is NONE, choose the higher-conviction directional setup between LONG and SHORT.\n"
         "Do not get shaken by ordinary and usual candles. Identify the dominant and important candles within the full market structure, and let them drive your directional decision.\n"
-        "Use multi-timeframe OHLCV candles to judge market regime, structure, trend quality, timeframe alignment, continuation vs reversal, impulse vs correction, healthy pullback vs structural damage, exhaustion vs re-acceleration, breakout/breakdown acceptance vs failure, retest hold vs rejection, balance vs imbalance, volatility expansion vs compression, momentum and volume confirmation vs divergence, liquidity sweeps, and location relative to key swings and range boundaries.\n"
+        "Use the provided 1h OHLCV candles to judge market regime, structure, trend quality, continuation vs reversal, impulse vs correction, healthy pullback vs structural damage, exhaustion vs re-acceleration, breakout/breakdown acceptance vs failure, retest hold vs rejection, balance vs imbalance, volatility expansion vs compression, momentum and volume confirmation vs divergence, liquidity sweeps, and location relative to key swings and range boundaries.\n"
         "Since my assets are in your hands, please act responsibly.\n"
         "Schema: {\"decision\":\"LONG\"} or {\"decision\":\"SHORT\"}.\n"
         "Return JSON only.\n"
-        "Within each timeframe array, candle rows are ordered from oldest to most recent.\n"
-        "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"LONG\"|\"SHORT\"|\"NONE\", \"ohlcv\": {timeframe: [[open, high, low, close, volume], ...]}}.\n\n"
+        "Within the 1h candle array, candle rows are ordered from oldest to most recent.\n"
+        "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"LONG\"|\"SHORT\"|\"NONE\", \"ohlcv\": {\"1h\": [[open, high, low, close, volume], ...]}}.\n\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -383,6 +383,9 @@ def _save_direction_analysis_data(
                     "model": model,
                     "api_version": api_version,
                     "thinking_level": thinking_level,
+                    "payload_summary": {
+                        "timeframes": _summarize_timeframe_ohlcv(prompt_payload.get("ohlcv") or {}),
+                    },
                     "prompt": prompt,
                     "payload": prompt_payload,
                 },
@@ -552,7 +555,7 @@ def evaluate_hakai_direction(
                 "api_version": api_version,
                 "thinking_level": thinking_level,
                 "cycle_dir": cycle_dir,
-                "timeframes": _summarize_timeframe_ohlcv(timeframe_ohlcv),
+                "ai_prompt_timeframes": _summarize_timeframe_ohlcv(timeframe_ohlcv),
             }
         ),
     )

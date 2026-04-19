@@ -36,6 +36,8 @@ from src.binance.trade_position import (
 from src.infra.env_loader import get_binance_credentials
 from src.infra.logger import format_log_details, get_logger
 from src.strategy.runtime_config import (
+    DEFAULT_AI_PROMPT_CANDLE_COUNT,
+    DEFAULT_AI_PROMPT_TIMEFRAME,
     DEFAULT_GEMINI_API_VERSION,
     DEFAULT_INITIAL_POSITION_SIZE_RATIO,
     DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
@@ -54,7 +56,6 @@ DB_DIR = os.path.join(ROOT_DIR, "db")
 MAX_DB_CYCLE_DIRS = 20
 
 DEFAULT_SYMBOL = "BTCUSDT"
-DEFAULT_TIMEFRAMES: tuple[str, ...] = ("1d", "1h")
 _SUPPORTED_GEMINI_THINKING_LEVELS = {"minimal", "low", "medium", "high"}
 _DEFAULT_GEMINI_THINKING_LEVEL = "high"
 _DEFAULT_GEMINI_API_VERSION = DEFAULT_GEMINI_API_VERSION
@@ -85,6 +86,18 @@ def _safe_int(value: Any, default: int) -> int:
 def _normalize_positive_int(value: Any, default: int) -> int:
     parsed = _safe_int(value, default)
     return parsed if parsed > 0 else default
+
+
+def _normalize_ai_prompt_timeframe(value: Any) -> str:
+    normalized = str(value or DEFAULT_AI_PROMPT_TIMEFRAME).strip().lower() or DEFAULT_AI_PROMPT_TIMEFRAME
+    if normalized != DEFAULT_AI_PROMPT_TIMEFRAME:
+        logger.warning(
+            "Unsupported ai_prompt_timeframe=%s; forcing %s",
+            value,
+            DEFAULT_AI_PROMPT_TIMEFRAME,
+        )
+        return DEFAULT_AI_PROMPT_TIMEFRAME
+    return DEFAULT_AI_PROMPT_TIMEFRAME
 
 
 def _normalize_ratio(value: Any, default: float) -> float:
@@ -192,13 +205,21 @@ def _load_strategy_config() -> Dict[str, Any]:
         initial_position_size_ratio = DEFAULT_INITIAL_POSITION_SIZE_RATIO
         position_size_ratio_max = DEFAULT_POSITION_SIZE_RATIO_MAX
 
+    ai_prompt_candle_count = _normalize_positive_int(
+        raw.get("ai_prompt_candle_count", raw.get("ai_candle_count_per_timeframe", DEFAULT_AI_PROMPT_CANDLE_COUNT)),
+        DEFAULT_AI_PROMPT_CANDLE_COUNT,
+    )
+
     return {
         "symbol": symbol,
         "cycle_interval_seconds": _normalize_positive_int(raw.get("cycle_interval_seconds", 60), 60),
         "trigger_pct_usdt": _normalize_trigger_percent(raw.get("trigger_pct_usdt", 0.4), 0.4),
         "fixed_leverage": _normalize_positive_int(raw.get("fixed_leverage", 10), 10),
         "stop_loss_pct": _normalize_ratio(raw.get("stop_loss_pct", 0.04), 0.04),
-        "ai_candle_count_per_timeframe": _normalize_positive_int(raw.get("ai_candle_count_per_timeframe", 24), 24),
+        "ai_prompt_timeframe": _normalize_ai_prompt_timeframe(
+            raw.get("ai_prompt_timeframe", DEFAULT_AI_PROMPT_TIMEFRAME)
+        ),
+        "ai_prompt_candle_count": ai_prompt_candle_count,
         "position_sizing_daily_sample_days": _normalize_positive_int(
             raw.get("position_sizing_daily_sample_days", DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS),
             DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
@@ -489,51 +510,62 @@ def _serialize_ohlcv_rows(candles: Sequence[Dict[str, Any]], *, limit: int) -> l
 def _fetch_prompt_market_context(
     *,
     symbol: str,
-    candle_count: int,
+    ai_prompt_timeframe: str,
+    ai_prompt_candle_count: int,
     position_sizing_daily_sample_days: int,
     position_sizing_live_window_hours: int,
     as_of_ms: Optional[int],
 ) -> Dict[str, Any]:
-    timeframe_payload: Dict[str, list[list[float]]] = {}
-    daily_position_sizing_candles: Optional[list[Dict[str, Any]]] = None
-    live_window_candles: Optional[list[Dict[str, Any]]] = None
+    resolved_ai_prompt_timeframe = _normalize_ai_prompt_timeframe(ai_prompt_timeframe)
+    resolved_ai_prompt_candle_count = max(1, int(ai_prompt_candle_count))
+    resolved_position_sizing_daily_sample_days = max(1, int(position_sizing_daily_sample_days))
+    resolved_position_sizing_live_window_hours = max(1, int(position_sizing_live_window_hours))
     resolved_as_of_ms = _resolve_as_of_ms(as_of_ms)
+    prompt_fetch_limit = max(resolved_ai_prompt_candle_count, resolved_position_sizing_live_window_hours)
+    raw_prompt_klines = fetch_klines(
+        symbol,
+        resolved_ai_prompt_timeframe,
+        prompt_fetch_limit,
+        as_of_ms=resolved_as_of_ms,
+    )
+    prompt_candles = parse_klines(raw_prompt_klines)
+    if len(prompt_candles) < prompt_fetch_limit:
+        raise ValueError(
+            f"not enough candles for {symbol} {resolved_ai_prompt_timeframe}: "
+            f"have={len(prompt_candles)} need={prompt_fetch_limit}"
+        )
 
-    for timeframe in DEFAULT_TIMEFRAMES:
-        fetch_limit = candle_count
-        if timeframe == "1h":
-            fetch_limit = max(candle_count, position_sizing_live_window_hours)
-        elif timeframe == "1d":
-            # Fetch a small buffer because Binance includes the current in-progress daily candle.
-            fetch_limit = max(candle_count, position_sizing_daily_sample_days + 2)
+    timeframe_payload: Dict[str, list[list[float]]] = {
+        resolved_ai_prompt_timeframe: _serialize_ohlcv_rows(
+            prompt_candles,
+            limit=resolved_ai_prompt_candle_count,
+        )
+    }
+    live_window_candles = prompt_candles[-resolved_position_sizing_live_window_hours:]
 
-        raw_klines = fetch_klines(symbol, timeframe, fetch_limit, as_of_ms=resolved_as_of_ms)
-        candles = parse_klines(raw_klines)
-        if len(candles) < fetch_limit:
-            raise ValueError(
-                f"not enough candles for {symbol} {timeframe}: have={len(candles)} need={fetch_limit}"
-            )
-        timeframe_payload[timeframe] = _serialize_ohlcv_rows(candles, limit=candle_count)
-        if timeframe == "1h":
-            live_window_candles = candles[-position_sizing_live_window_hours:]
-        elif timeframe == "1d":
-            daily_position_sizing_candles = _select_closed_candles(
-                candles,
-                interval=timeframe,
-                limit=position_sizing_daily_sample_days,
-                as_of_ms=resolved_as_of_ms,
-            )
+    daily_fetch_limit = resolved_position_sizing_daily_sample_days + 2
+    raw_daily_klines = fetch_klines(symbol, "1d", daily_fetch_limit, as_of_ms=resolved_as_of_ms)
+    daily_candles = parse_klines(raw_daily_klines)
+    if len(daily_candles) < daily_fetch_limit:
+        raise ValueError(
+            f"not enough candles for {symbol} 1d: have={len(daily_candles)} need={daily_fetch_limit}"
+        )
+    daily_position_sizing_candles = _select_closed_candles(
+        daily_candles,
+        interval="1d",
+        limit=resolved_position_sizing_daily_sample_days,
+        as_of_ms=resolved_as_of_ms,
+    )
 
-    if live_window_candles is None or len(live_window_candles) < position_sizing_live_window_hours:
+    if len(live_window_candles) < resolved_position_sizing_live_window_hours:
         raise ValueError("1h candles unavailable for live window calculation")
-    if (
-        daily_position_sizing_candles is None
-        or len(daily_position_sizing_candles) < position_sizing_daily_sample_days
-    ):
+    if len(daily_position_sizing_candles) < resolved_position_sizing_daily_sample_days:
         raise ValueError("1d candles unavailable for rank-based position sizing")
 
     return {
         "timeframes": timeframe_payload,
+        "ai_prompt_timeframe": resolved_ai_prompt_timeframe,
+        "ai_prompt_candle_count": resolved_ai_prompt_candle_count,
         "daily_position_sizing_candles": daily_position_sizing_candles,
         "live_window_candles": live_window_candles,
     }
@@ -2701,7 +2733,8 @@ def run_hakai_cycle(
 
     market_context = _fetch_prompt_market_context(
         symbol=symbol,
-        candle_count=int(config["ai_candle_count_per_timeframe"]),
+        ai_prompt_timeframe=str(config["ai_prompt_timeframe"]),
+        ai_prompt_candle_count=int(config["ai_prompt_candle_count"]),
         position_sizing_daily_sample_days=int(config["position_sizing_daily_sample_days"]),
         position_sizing_live_window_hours=int(config["position_sizing_live_window_hours"]),
         as_of_ms=resolved_as_of_ms,
@@ -2721,7 +2754,9 @@ def run_hakai_cycle(
             {
                 "symbol": symbol,
                 "cycle_dir": cycle_dir,
-                "timeframes": {key: len(value) for key, value in market_context["timeframes"].items()},
+                "ai_prompt_timeframes": {key: len(value) for key, value in market_context["timeframes"].items()},
+                "ai_prompt_timeframe": market_context.get("ai_prompt_timeframe"),
+                "ai_prompt_candle_count": market_context.get("ai_prompt_candle_count"),
                 "volatility_snapshot": volatility_snapshot,
             }
         ),
@@ -3132,7 +3167,7 @@ def run_hourly_volatility_resize(
 
 __all__ = [
     "DEFAULT_SYMBOL",
-    "DEFAULT_TIMEFRAMES",
+    "DEFAULT_AI_PROMPT_TIMEFRAME",
     "run_hourly_volatility_resize",
     "run_hakai_cycle",
 ]
