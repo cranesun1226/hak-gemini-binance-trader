@@ -36,6 +36,49 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(mocked_run_hakai_cycle.call_count, 1)
 
+    def test_non_ai_cycle_does_not_emit_cycle_or_hourly_notifications(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "scheduler_state.json")
+            with patch("src.strategy.scheduler.STATE_FILE", state_file):
+                scheduler = TradingScheduler()
+                with patch.object(scheduler, "_emit_telegram_text") as mocked_emit:
+                    scheduler._maybe_send_cycle_notifications(
+                        datetime(2026, 4, 22, 10, 0, 10, tzinfo=timezone.utc),
+                        {
+                            "success": True,
+                            "action": "hold_waiting_price_trigger",
+                            "ai_triggered": False,
+                            "ai_decision": None,
+                        },
+                    )
+
+        mocked_emit.assert_not_called()
+
+    def test_ai_cycle_still_emits_completion_notification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "scheduler_state.json")
+            with patch("src.strategy.scheduler.STATE_FILE", state_file):
+                scheduler = TradingScheduler()
+                with patch.object(scheduler, "_emit_telegram_text") as mocked_emit:
+                    scheduler._maybe_send_cycle_notifications(
+                        datetime(2026, 4, 22, 10, 0, 10, tzinfo=timezone.utc),
+                        {
+                            "success": True,
+                            "symbol": "BTCUSDT",
+                            "action": "opened_new_position",
+                            "ai_triggered": True,
+                            "ai_decision": "LONG",
+                            "current_price": 100000.0,
+                            "trigger_reason": "price_distance_reached",
+                            "position_before": None,
+                            "position": None,
+                            "next_trigger_down": 99000.0,
+                            "next_trigger_up": 101000.0,
+                        },
+                    )
+
+        mocked_emit.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

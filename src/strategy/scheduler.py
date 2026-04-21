@@ -827,36 +827,11 @@ class TradingScheduler:
             return
 
     def _maybe_send_cycle_notifications(self, cycle_time: datetime, result: Dict[str, Any]) -> None:
-        if (
-            bool(result.get("ai_triggered"))
-            or not bool(result.get("success"))
-            or str(result.get("action")) not in {
-                "hold_waiting_price_trigger",
-                "hold_waiting_round_trigger",
-                "hold_volatility_cooldown",
-            }
-        ):
+        if bool(result.get("ai_triggered")):
             cycle_payload = dict(result)
             cycle_payload["timestamp"] = cycle_time.isoformat()
             cycle_payload["last_ai_decision"] = self.state.get("last_ai_decision")
             self._emit_telegram_text(self._build_cycle_completed_message(cycle_payload))
-
-        if not self._is_hourly_report_cycle(cycle_time):
-            return
-
-        hourly_slot = self._hourly_slot(cycle_time)
-        if self.state.get("last_hourly_report_slot") == hourly_slot:
-            return
-
-        hourly_payload = dict(result)
-        hourly_payload["timestamp"] = cycle_time.isoformat()
-        hourly_payload["last_ai_decision"] = self.state.get("last_ai_decision")
-        hourly_payload["last_ai_triggered_at"] = self.state.get("last_ai_triggered_at")
-        sent = self._emit_telegram_text(self._build_hourly_status_message(hourly_payload))
-        if not sent:
-            return
-        self.state["last_hourly_report_slot"] = hourly_slot
-        self.save_state()
 
     def _next_cycle_boundary(
         self,
