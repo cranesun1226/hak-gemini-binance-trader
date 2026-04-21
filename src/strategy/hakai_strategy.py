@@ -57,7 +57,7 @@ DB_DIR = os.path.join(ROOT_DIR, "db")
 MAX_DB_CYCLE_DIRS = 20
 
 DEFAULT_SYMBOL = "BTCUSDT"
-_SUPPORTED_GEMINI_THINKING_LEVELS = {"minimal", "low", "medium", "high"}
+_SUPPORTED_GEMINI_THINKING_LEVELS = {"low", "medium", "high"}
 _DEFAULT_GEMINI_THINKING_LEVEL = "high"
 _DEFAULT_GEMINI_API_VERSION = DEFAULT_GEMINI_API_VERSION
 _TRIGGER_PRICE_DIGITS = 2
@@ -167,10 +167,15 @@ def _normalize_optional_trigger_percent(value: Any) -> Optional[float]:
 
 def _normalize_gemini_thinking_level(value: Any) -> str:
     normalized = str(value or _DEFAULT_GEMINI_THINKING_LEVEL).strip().lower() or _DEFAULT_GEMINI_THINKING_LEVEL
+    if normalized == "minimal":
+        logger.warning(
+            "gemini_thinking_level=minimal is not supported by gemini-3.1-pro-preview; using low",
+        )
+        return "low"
     if normalized in _SUPPORTED_GEMINI_THINKING_LEVELS:
         return normalized
     logger.warning(
-        "Unsupported gemini_thinking_level=%s for gemini-3-flash-preview; using %s",
+        "Unsupported gemini_thinking_level=%s for gemini-3.1-pro-preview; using %s",
         value,
         _DEFAULT_GEMINI_THINKING_LEVEL,
     )
@@ -237,7 +242,7 @@ def _load_strategy_config() -> Dict[str, Any]:
     return {
         "symbol": symbol,
         "cycle_interval_seconds": _normalize_positive_int(raw.get("cycle_interval_seconds", 60), 60),
-        "trigger_pct_usdt": _normalize_trigger_percent(raw.get("trigger_pct_usdt", 0.4), 0.4),
+        "trigger_pct_usdt": _normalize_trigger_percent(raw.get("trigger_pct_usdt", 1.0), 1.0),
         "fixed_leverage": _normalize_positive_int(raw.get("fixed_leverage", 10), 10),
         "stop_loss_pct": _normalize_ratio(raw.get("stop_loss_pct", 0.04), 0.04),
         "ai_prompt_timeframe": _normalize_ai_prompt_timeframe(
@@ -1266,17 +1271,6 @@ def _update_position_episode_unlock_state(
     unlocked_state["position_sizing_unlocked"] = True
     unlocked_state["position_sizing_activated_at"] = _current_time_utc().isoformat()
     return unlocked_state
-
-
-def _did_position_sizing_just_unlock(
-    *,
-    previous_position_episode_state: Any,
-    current_position_episode_state: Any,
-) -> bool:
-    previous_unlocked = bool(_normalize_position_episode_state(previous_position_episode_state)["position_sizing_unlocked"])
-    current_unlocked = bool(_normalize_position_episode_state(current_position_episode_state)["position_sizing_unlocked"])
-    return (not previous_unlocked) and current_unlocked
-
 
 def _build_position_sizing_plan(
     *,
@@ -2413,31 +2407,11 @@ def _determine_ai_trigger(
         "boundary_source": boundary_source,
     }
 
-
-def _build_forced_ai_trigger(
-    *,
-    current_price: float,
-    trigger_pct_usdt: float,
-    reason: str,
-) -> Dict[str, Any]:
-    next_levels = _build_trigger_levels(current_price, trigger_pct_usdt)
-    return {
-        "should_trigger": True,
-        "reason": str(reason or "").strip() or "forced_trigger",
-        "current_trigger_price": next_levels["trigger_price"],
-        "trigger_price": next_levels["trigger_price"],
-        "next_trigger_down": next_levels["next_trigger_down"],
-        "next_trigger_up": next_levels["next_trigger_up"],
-        "boundary_source": "forced_trigger",
-    }
-
-
 # Cycle entrypoints.
 def run_hakai_cycle(
     *,
     state: Optional[Dict[str, Any]] = None,
     as_of_ms: Optional[int] = None,
-    forced_trigger_reason: Optional[str] = None,
     notification_callback: NotificationCallback = None,
 ) -> Dict[str, Any]:
     """Run one full HAK GEMINI BINANCE TRADER cycle and return a serializable result payload."""
@@ -2593,7 +2567,6 @@ def run_hakai_cycle(
         return result
 
     result["current_price"] = reference_price
-    position_episode_state_before_unlock = dict(position_episode_state)
     if (
         enable_auto_position
         and position_episode_state["initial_entry_price"] is not None
@@ -2631,14 +2604,6 @@ def run_hakai_cycle(
         )
     elif not enable_auto_position:
         position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
-    position_sizing_just_unlocked = (
-        _did_position_sizing_just_unlock(
-            previous_position_episode_state=position_episode_state_before_unlock,
-            current_position_episode_state=position_episode_state,
-        )
-        if enable_auto_position
-        else False
-    )
 
     stop_sync_result: Optional[Dict[str, Any]] = None
     prefetched_account_equity: Optional[float] = None
@@ -2685,25 +2650,14 @@ def run_hakai_cycle(
                 ),
             )
 
-    effective_forced_trigger_reason = str(forced_trigger_reason or "").strip()
-    if not effective_forced_trigger_reason and position_sizing_just_unlocked:
-        effective_forced_trigger_reason = "profit_activation_unlocked"
-
-    if effective_forced_trigger_reason:
-        trigger_info = _build_forced_ai_trigger(
-            current_price=reference_price,
-            trigger_pct_usdt=trigger_pct_usdt,
-            reason=effective_forced_trigger_reason,
-        )
-    else:
-        trigger_info = _determine_ai_trigger(
-            has_position=has_position,
-            current_price=reference_price,
-            last_ai_trigger_price=_normalize_trigger_price(previous_state.get("last_ai_trigger_price")),
-            trigger_pct_usdt=trigger_pct_usdt,
-            next_trigger_down=_normalize_trigger_price(previous_state.get("next_trigger_down")),
-            next_trigger_up=_normalize_trigger_price(previous_state.get("next_trigger_up")),
-        )
+    trigger_info = _determine_ai_trigger(
+        has_position=has_position,
+        current_price=reference_price,
+        last_ai_trigger_price=_normalize_trigger_price(previous_state.get("last_ai_trigger_price")),
+        trigger_pct_usdt=trigger_pct_usdt,
+        next_trigger_down=_normalize_trigger_price(previous_state.get("next_trigger_down")),
+        next_trigger_up=_normalize_trigger_price(previous_state.get("next_trigger_up")),
+    )
     trigger_price = _normalize_trigger_price(trigger_info.get("trigger_price"))
     result["trigger_reason"] = trigger_info.get("reason")
     result["trigger_price"] = trigger_price
@@ -3212,40 +3166,8 @@ def run_hakai_cycle(
         ),
     )
     return result
-
-
-def run_hourly_volatility_resize(
-    *,
-    as_of_ms: Optional[int] = None,
-    state: Optional[Dict[str, Any]] = None,
-    notification_callback: NotificationCallback = None,
-) -> Dict[str, Any]:
-    """Run the hourly AI evaluation through the main AI cycle pipeline."""
-    delegated_result = run_hakai_cycle(
-        state=state,
-        as_of_ms=as_of_ms,
-        forced_trigger_reason="hourly_time_trigger",
-        notification_callback=notification_callback,
-    )
-    logger.info(
-        "Hourly volatility resize completed via main AI cycle | %s",
-        format_log_details(
-            {
-                "symbol": delegated_result.get("symbol"),
-                "success": delegated_result.get("success"),
-                "action": delegated_result.get("action"),
-                "ai_decision": delegated_result.get("ai_decision"),
-                "trigger_reason": delegated_result.get("trigger_reason"),
-                "cycle_dir": delegated_result.get("cycle_dir"),
-            }
-        ),
-    )
-    return delegated_result
-
-
 __all__ = [
     "DEFAULT_SYMBOL",
     "DEFAULT_AI_PROMPT_TIMEFRAME",
-    "run_hourly_volatility_resize",
     "run_hakai_cycle",
 ]

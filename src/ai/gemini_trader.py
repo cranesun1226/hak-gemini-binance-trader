@@ -59,16 +59,26 @@ logger = get_logger("gemini_trader")
 DecisionT = TypeVar("DecisionT")
 
 GEMINI_GENERATE_MAX_RETRIES = 3
-GEMINI_DIRECTION_MODEL = "gemini-3-flash-preview"
+GEMINI_DIRECTION_MODEL = "gemini-3.1-pro-preview"
 # Backward-compatible alias for existing imports.
 GEMINI_PRO_ONLY_MODEL = GEMINI_DIRECTION_MODEL
 
 _ONE_MILLION = 1_000_000
-_GEMINI_MODEL_PRICING_USD_PER_MILLION: dict[str, dict[str, float]] = {
+_GEMINI_3_1_PRO_STANDARD_PRICING_TIERS: tuple[dict[str, Optional[float]], ...] = (
+    {
+        "prompt_token_threshold": 200_000,
+        "input_standard": 2.0,
+        "output_standard_including_thinking": 12.0,
+    },
+    {
+        "prompt_token_threshold": None,
+        "input_standard": 4.0,
+        "output_standard_including_thinking": 18.0,
+    },
+)
+_GEMINI_MODEL_PRICING_USD_PER_MILLION: dict[str, dict[str, Any]] = {
     GEMINI_DIRECTION_MODEL: {
-        "input_text_image_video": 0.5,
-        "input_audio": 1.0,
-        "output_including_thinking": 3.0,
+        "standard_tiers": _GEMINI_3_1_PRO_STANDARD_PRICING_TIERS,
     },
 }
 
@@ -223,12 +233,28 @@ def estimate_gemini_cost(
         )
     audio_input_token_count = min(audio_input_token_count, prompt_token_count)
     text_image_video_input_token_count = max(prompt_token_count - audio_input_token_count, 0)
+    pricing_tiers = pricing.get("standard_tiers")
+    selected_tier: dict[str, Any] = {}
+    if isinstance(pricing_tiers, (list, tuple)):
+        for tier in pricing_tiers:
+            if not isinstance(tier, dict):
+                continue
+            threshold = tier.get("prompt_token_threshold")
+            if threshold is None or prompt_token_count <= _safe_non_negative_int(threshold):
+                selected_tier = tier
+                break
+    if not selected_tier:
+        selected_tier = pricing if isinstance(pricing, dict) else {}
+
     text_image_video_input_rate = float(
-        pricing.get("input_text_image_video", pricing.get("input_standard", 0.0))
+        selected_tier.get("input_text_image_video", selected_tier.get("input_standard", 0.0))
     )
-    audio_input_rate = float(pricing.get("input_audio", text_image_video_input_rate))
+    audio_input_rate = float(selected_tier.get("input_audio", text_image_video_input_rate))
     output_rate = float(
-        pricing.get("output_including_thinking", pricing.get("output_standard_including_thinking", 0.0))
+        selected_tier.get(
+            "output_including_thinking",
+            selected_tier.get("output_standard_including_thinking", 0.0),
+        )
     )
 
     input_cost_usd = (
@@ -242,7 +268,7 @@ def estimate_gemini_cost(
         "currency": "USD",
         "model": model,
         "pricing_tier": "standard",
-        "pricing_prompt_token_threshold": None,
+        "pricing_prompt_token_threshold": selected_tier.get("prompt_token_threshold"),
         "input_rate_usd_per_million": text_image_video_input_rate,
         "input_text_image_video_rate_usd_per_million": text_image_video_input_rate,
         "input_audio_rate_usd_per_million": audio_input_rate,

@@ -34,7 +34,7 @@ DEFAULT_POSITION_SIZE_RATIO_MAX = 0.98
 DEFAULT_CONFIG: Dict[str, Any] = {
     "symbol": "BTCUSDT",
     "cycle_interval_seconds": 60,
-    "trigger_pct_usdt": 0.4,
+    "trigger_pct_usdt": 1.0,
     "fixed_leverage": 10,
     "stop_loss_pct": 0.04,
     "ai_prompt_timeframe": DEFAULT_AI_PROMPT_TIMEFRAME,

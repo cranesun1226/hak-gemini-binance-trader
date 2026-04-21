@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional, Sequence
 from src.infra.logger import format_log_details, get_logger
 from src.strategy.runtime_config import load_runtime_config
 from src.infra.telegram import escape_telegram_html, sanitize_telegram_html, send_telegram_message
-from src.strategy.hakai_strategy import run_hakai_cycle, run_hourly_volatility_resize
+from src.strategy.hakai_strategy import run_hakai_cycle
 
 logger = get_logger("scheduler")
 
@@ -30,8 +30,6 @@ TRIGGER_REASON_LABELS = {
     "waiting_for_next_round_trigger": "Waiting for next round",
     "price_distance_reached": "Next price level reached",
     "waiting_for_next_price_trigger": "Waiting for next price level",
-    "profit_activation_unlocked": "Profit gate unlocked",
-    "hourly_time_trigger": "Hourly time trigger",
 }
 
 ACTION_LABELS = {
@@ -64,8 +62,6 @@ ACTION_LABELS = {
     "set_leverage_failed": "Failed to set leverage",
     "execution_failed": "Order execution failed",
     "executed": "Order executed",
-    "hourly_resize_skipped_ai_cycle": "Skipped hourly resize because AI cycle already adjusted",
-    "hourly_resize_skipped_no_position": "Skipped hourly resize because no open position",
 }
 
 STOP_SYNC_REASON_LABELS = {
@@ -153,7 +149,6 @@ class TradingScheduler:
             "stop_risk_basis": None,
             "last_cycle_result": None,
             "last_hourly_report_slot": None,
-            "last_hourly_resize_slot": None,
         }
 
     def _load_config(self) -> Dict[str, Any]:
@@ -184,6 +179,7 @@ class TradingScheduler:
                         merged["position_sizing_unlocked"] = False
                         merged["position_sizing_activated_at"] = None
                     merged.pop("last_ai_trigger_round_price", None)
+                    merged.pop("last_hourly_resize_slot", None)
                     merged["version"] = STATE_VERSION
                     return merged
         except json.JSONDecodeError as exc:
@@ -194,6 +190,7 @@ class TradingScheduler:
 
     def save_state(self) -> None:
         try:
+            self.state.pop("last_hourly_resize_slot", None)
             with open(self.state_file_path, "w", encoding="utf-8") as file_obj:
                 json.dump(self.state, file_obj, indent=2, ensure_ascii=False)
         except Exception as exc:
@@ -205,9 +202,9 @@ class TradingScheduler:
         for key, value in update.items():
             self.state[key] = value
         self.state.pop("last_ai_trigger_round_price", None)
+        self.state.pop("last_hourly_resize_slot", None)
 
     def _summarize_cycle_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        hourly_resize = result.get("hourly_resize") if isinstance(result.get("hourly_resize"), dict) else {}
         return {
             "time": datetime.now(timezone.utc).isoformat(),
             "success": bool(result.get("success")),
@@ -221,7 +218,6 @@ class TradingScheduler:
             "next_trigger_down": result.get("next_trigger_down"),
             "next_trigger_up": result.get("next_trigger_up"),
             "cycle_dir": result.get("cycle_dir"),
-            "hourly_resize_action": hourly_resize.get("action"),
         }
 
     def _format_timestamp(self, timestamp_value: Optional[str]) -> str:
@@ -503,44 +499,6 @@ class TradingScheduler:
             return f"Failed / {reason}"
         return "Failed"
 
-    def _format_hourly_resize_summary(self, resize: Any) -> str:
-        if not isinstance(resize, dict):
-            return "Not run."
-
-        action = str(resize.get("action") or "").strip()
-        ai_decision = str(
-            resize.get("ai_decision")
-            or resize.get("decision")
-            or ((resize.get("position") or {}).get("direction") if isinstance(resize.get("position"), dict) else "")
-            or ((resize.get("position_before") or {}).get("direction") if isinstance(resize.get("position_before"), dict) else "")
-            or ""
-        ).strip().upper()
-        direction_suffix = f" ({ai_decision})" if ai_decision else ""
-
-        if action == "scaled_in_position":
-            return f"Hourly AI scaled in via 24h volatility rank sizing{direction_suffix}."
-        if action == "scaled_out_position":
-            return f"Hourly AI scaled out via 24h volatility rank sizing{direction_suffix}."
-        if action == "kept_position_size":
-            return f"Hourly AI kept size via 24h volatility rank sizing{direction_suffix}."
-        if action == "opened_new_position":
-            return f"Hourly AI opened a new position{direction_suffix}."
-        if action == "reversed_position":
-            return f"Hourly AI reversed the position{direction_suffix}."
-        if action == "skipped_scale_in_below_min_notional":
-            return f"Hourly AI skipped scale-in below min notional{direction_suffix}."
-        if action == "skipped_entry_below_min_notional":
-            return f"Hourly AI skipped entry below min notional{direction_suffix}."
-        if action == "hourly_resize_skipped_ai_cycle":
-            return "Skipped because the AI cycle already resized."
-        if action == "hourly_resize_skipped_no_position":
-            return "Skipped because there was no open position."
-        if action == "hold_volatility_cooldown":
-            return "Initial entry stayed paused by the 1h volatility cool down."
-        if not bool(resize.get("success")):
-            return f"Failed ({action or 'unknown'})."
-        return f"{self._humanize_code_label(action).capitalize()}{direction_suffix}."
-
     def _hourly_slot_start(self, cycle_time: datetime) -> datetime:
         if cycle_time.tzinfo is None:
             cycle_time = cycle_time.replace(tzinfo=timezone.utc)
@@ -608,51 +566,6 @@ class TradingScheduler:
             return False
         current_bucket_slot = self._cycle_bucket_slot(now_utc, interval_seconds=interval_seconds)
         return self._last_cycle_bucket_slot(interval_seconds=interval_seconds) != current_bucket_slot
-
-    def _hourly_resize_anchor_ms(self, cycle_time: datetime) -> int:
-        return int(cycle_time.timestamp() * 1000)
-
-    def _maybe_run_hourly_resize(self, cycle_time: datetime, result: Dict[str, Any]) -> None:
-        if not self._is_hourly_report_cycle(cycle_time):
-            return
-
-        hourly_slot = self._hourly_slot(cycle_time)
-        if self.state.get("last_hourly_resize_slot") == hourly_slot:
-            return
-
-        if bool(result.get("ai_triggered")):
-            result["hourly_resize"] = {
-                "success": True,
-                "action": "hourly_resize_skipped_ai_cycle",
-                "decision": result.get("ai_decision"),
-                "position_before": result.get("position_before"),
-                "position": result.get("position"),
-            }
-            self.state["last_hourly_resize_slot"] = hourly_slot
-            return
-
-        hourly_resize_result = run_hourly_volatility_resize(
-            as_of_ms=self._hourly_resize_anchor_ms(cycle_time),
-            state=dict(self.state),
-            notification_callback=self._notify_telegram_event,
-        )
-        canonical_result = dict(hourly_resize_result)
-        canonical_result["hourly_resize"] = dict(hourly_resize_result)
-        result.clear()
-        result.update(canonical_result)
-        self._merge_state_update(hourly_resize_result.get("state_update"))
-        self.state["last_hourly_resize_slot"] = hourly_slot
-        logger.info(
-            "Hourly volatility resize processed | %s",
-            format_log_details(
-                {
-                    "hourly_slot": hourly_slot,
-                    "cycle_time": cycle_time.isoformat(),
-                    "hourly_resize_action": hourly_resize_result.get("action"),
-                    "hourly_resize_success": hourly_resize_result.get("success"),
-                }
-            ),
-        )
 
     def _build_message(
         self,
@@ -861,10 +774,6 @@ class TradingScheduler:
                                 payload.get("next_trigger_up"),
                             ),
                         ),
-                        self._format_html_line(
-                            "Hourly Resize",
-                            self._format_hourly_resize_summary(payload.get("hourly_resize")),
-                        ),
                     ],
                     True,
                 ),
@@ -998,7 +907,6 @@ class TradingScheduler:
             notification_callback=self._notify_telegram_event,
         )
         self._merge_state_update(result.get("state_update"))
-        self._maybe_run_hourly_resize(cycle_time, result)
         self.state["last_cycle_time"] = cycle_time.isoformat()
         self.state["last_minute_slot"] = cycle_time.replace(second=0, microsecond=0).isoformat()
         self.state["last_cycle_result"] = self._summarize_cycle_result(result)

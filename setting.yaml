@@ -10,13 +10,13 @@
 # Trading symbol to monitor and trade; the current runtime only allows BTCUSDT.
 symbol: BTCUSDT
 
-# 전략 실행 루프를 몇 초 간격으로 반복할지 설정합니다.
-# Sets how many seconds to wait between each strategy execution cycle.
+# 가격 변동 감시 루프를 몇 초 간격으로 반복할지 설정합니다.
+# Sets how many seconds to wait between each price-monitoring cycle.
 cycle_interval_seconds: 60
 
-# 마지막 트리거 기준가에서 몇 % 움직이면 AI 판단을 다시 요청할지 설정하며 0.4는 0.4%를 뜻합니다.
-# Sets the percent move from the last trigger price needed to request a new AI decision; 0.4 means 0.4%.
-trigger_pct_usdt: 0.4
+# 마지막 AI 트리거 기준가에서 몇 % 움직이면 AI 판단을 다시 요청할지 설정하며 1.0은 1.0%를 뜻합니다.
+# Sets the percent move from the last AI trigger price needed to request a new AI decision; 1.0 means 1.0%.
+trigger_pct_usdt: 1.0
 
 # ================================================================================
 # AI 입력 및 추론 설정
@@ -30,8 +30,8 @@ ai_prompt_timeframe: 1h
 # Number of recent 1-hour candles included in the AI prompt.
 ai_prompt_candle_count: 100
 
-# Gemini 추론 강도를 설정하며 minimal, low, medium, high 중 하나를 사용합니다.
-# Sets the Gemini reasoning level; use one of minimal, low, medium, or high.
+# Gemini 3.1 Pro Preview 추론 강도를 설정하며 low, medium, high 중 하나를 사용합니다.
+# Sets the Gemini 3.1 Pro Preview reasoning level; use one of low, medium, or high.
 gemini_thinking_level: high
 
 # ================================================================================

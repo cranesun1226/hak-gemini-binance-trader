@@ -11,6 +11,7 @@ class StrategyConfigTests(unittest.TestCase):
 
         self.assertEqual(config["ai_prompt_timeframe"], "1h")
         self.assertEqual(config["ai_prompt_candle_count"], 100)
+        self.assertEqual(config["trigger_pct_usdt"], 1.0)
         self.assertTrue(config["enable_auto_position"])
 
     @patch("src.strategy.hakai_strategy.load_runtime_config", return_value={"ai_candle_count_per_timeframe": 48})
@@ -31,6 +32,12 @@ class StrategyConfigTests(unittest.TestCase):
         config = hakai_strategy._load_strategy_config()
 
         self.assertFalse(config["enable_auto_position"])
+
+    @patch("src.strategy.hakai_strategy.load_runtime_config", return_value={"gemini_thinking_level": "minimal"})
+    def test_legacy_minimal_thinking_level_is_coerced_to_low_for_pro_model(self, _mocked_load_runtime_config):
+        config = hakai_strategy._load_strategy_config()
+
+        self.assertEqual(config["gemini_thinking_level"], "low")
 
     @patch(
         "src.strategy.hakai_strategy.load_runtime_config",
