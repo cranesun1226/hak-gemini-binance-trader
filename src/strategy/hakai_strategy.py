@@ -38,6 +38,7 @@ from src.infra.logger import format_log_details, get_logger
 from src.strategy.runtime_config import (
     DEFAULT_AI_PROMPT_CANDLE_COUNT,
     DEFAULT_AI_PROMPT_TIMEFRAME,
+    DEFAULT_ENABLE_AUTO_POSITION,
     DEFAULT_GEMINI_API_VERSION,
     DEFAULT_INITIAL_POSITION_SIZE_RATIO,
     DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
@@ -176,6 +177,22 @@ def _normalize_gemini_thinking_level(value: Any) -> str:
     return _DEFAULT_GEMINI_THINKING_LEVEL
 
 
+def _normalize_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return bool(value)
+
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off", "flase"}:
+        return False
+    if value is not None:
+        logger.warning("Unsupported boolean value=%s; using default=%s", value, default)
+    return bool(default)
+
+
 def _load_strategy_config() -> Dict[str, Any]:
     raw = load_runtime_config(CONFIG_PATH)
 
@@ -184,6 +201,10 @@ def _load_strategy_config() -> Dict[str, Any]:
         logger.warning("Forcing symbol=%s to BTCUSDT-only runtime", symbol)
         symbol = DEFAULT_SYMBOL
 
+    enable_auto_position = _normalize_bool(
+        raw.get("enable_auto_position", DEFAULT_ENABLE_AUTO_POSITION),
+        DEFAULT_ENABLE_AUTO_POSITION,
+    )
     initial_position_size_ratio = _normalize_ratio(
         raw.get("initial_position_size_ratio", DEFAULT_INITIAL_POSITION_SIZE_RATIO),
         DEFAULT_INITIAL_POSITION_SIZE_RATIO,
@@ -197,13 +218,16 @@ def _load_strategy_config() -> Dict[str, Any]:
         DEFAULT_PROFIT_ACTIVATION_PCT,
     )
     if position_size_ratio_max <= initial_position_size_ratio:
-        logger.warning(
-            "Invalid position size ratio bounds initial=%s max=%s; using defaults",
-            raw.get("initial_position_size_ratio"),
-            raw.get("position_size_ratio_max"),
-        )
-        initial_position_size_ratio = DEFAULT_INITIAL_POSITION_SIZE_RATIO
-        position_size_ratio_max = DEFAULT_POSITION_SIZE_RATIO_MAX
+        if enable_auto_position:
+            logger.warning(
+                "Invalid position size ratio bounds initial=%s max=%s; using defaults",
+                raw.get("initial_position_size_ratio"),
+                raw.get("position_size_ratio_max"),
+            )
+            initial_position_size_ratio = DEFAULT_INITIAL_POSITION_SIZE_RATIO
+            position_size_ratio_max = DEFAULT_POSITION_SIZE_RATIO_MAX
+        else:
+            position_size_ratio_max = float(max(position_size_ratio_max, initial_position_size_ratio))
 
     ai_prompt_candle_count = _normalize_positive_int(
         raw.get("ai_prompt_candle_count", raw.get("ai_candle_count_per_timeframe", DEFAULT_AI_PROMPT_CANDLE_COUNT)),
@@ -229,6 +253,7 @@ def _load_strategy_config() -> Dict[str, Any]:
             DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
         ),
         "initial_position_size_ratio": float(initial_position_size_ratio),
+        "enable_auto_position": bool(enable_auto_position),
         "profit_activation_pct": float(profit_activation_pct),
         "position_size_ratio_max": float(position_size_ratio_max),
         "gemini_api_version": str(raw.get("gemini_api_version") or _DEFAULT_GEMINI_API_VERSION).strip()
@@ -936,12 +961,21 @@ def _format_percentile_sizing_summary(snapshot: Optional[Dict[str, Any]]) -> str
     else:
         location_label = "in-range"
 
+    keep_current_position_size = bool(payload.get("keep_current_position_size"))
+    enable_auto_position = _normalize_bool(payload.get("enable_auto_position", True), True)
+    if keep_current_position_size:
+        final_text = "bootstrap-hold"
+    elif not enable_auto_position:
+        final_text = f"fixed={applied_margin_ratio * 100.0:.2f}% (auto off)"
+    else:
+        final_text = f"final={applied_margin_ratio * 100.0:.2f}%"
+
     return (
         f"24h ln={live_range_log:.4f} | "
         f"rank={rank_estimate:.1f}/{sample_size} | "
         f"{location_label} | "
         f"vol={volatility_margin_ratio * 100.0:.2f}% | "
-        f"final={applied_margin_ratio * 100.0:.2f}%"
+        f"{final_text}"
     )
 
 
@@ -998,6 +1032,19 @@ def _normalize_position_episode_state(value: Any) -> Dict[str, Any]:
         "position_sizing_unlocked": position_sizing_unlocked,
         "position_sizing_activated_at": activated_at,
     }
+
+
+def _clear_position_episode_sizing_state(value: Any) -> Dict[str, Any]:
+    normalized_state = _normalize_position_episode_state(value)
+    if normalized_state["initial_entry_price"] is None:
+        return normalized_state
+
+    cleared_state = dict(normalized_state)
+    cleared_state["position_sizing_activation_pct"] = None
+    cleared_state["position_sizing_activation_price"] = None
+    cleared_state["position_sizing_unlocked"] = False
+    cleared_state["position_sizing_activated_at"] = None
+    return cleared_state
 
 
 def _build_position_episode_state_from_position(position: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1240,6 +1287,7 @@ def _build_position_sizing_plan(
     leverage: int,
     initial_position_size_ratio: float,
     position_size_ratio_max: float,
+    enable_auto_position: bool,
     profit_activation_pct: float,
     position_episode_state: Any,
     bootstrap_protected: bool,
@@ -1260,12 +1308,14 @@ def _build_position_sizing_plan(
     current_direction = _normalize_position_episode_direction(current_metrics.get("direction"))
     current_notional_usdt = abs(_safe_float(current_metrics.get("position_value"), 0.0) or 0.0)
     normalized_episode_state = _normalize_position_episode_state(position_episode_state)
+    auto_position_enabled = bool(enable_auto_position)
 
     activation_price = None
     activation_pct = None
     current_return_pct = None
     if (
-        normalized_episode_state["initial_entry_price"] is not None
+        auto_position_enabled
+        and normalized_episode_state["initial_entry_price"] is not None
         and normalized_episode_state["initial_entry_direction"] == desired_direction
     ):
         activation_pct = _resolve_position_sizing_activation_pct(
@@ -1283,12 +1333,13 @@ def _build_position_sizing_plan(
         )
 
     keep_current_position_size = bool(
-        bootstrap_protected
+        auto_position_enabled
+        and bootstrap_protected
         and current_direction in {"long", "short"}
         and current_direction == desired_direction
     )
     is_same_direction_position = current_direction in {"long", "short"} and current_direction == desired_direction
-    unlocked = bool(normalized_episode_state["position_sizing_unlocked"])
+    unlocked = bool(normalized_episode_state["position_sizing_unlocked"]) if auto_position_enabled else False
 
     if not is_same_direction_position:
         applied_margin_ratio = float(initial_position_size_ratio)
@@ -1298,6 +1349,9 @@ def _build_position_sizing_plan(
     elif keep_current_position_size:
         applied_margin_ratio = float(initial_position_size_ratio)
         position_sizing_mode = "bootstrap_hold"
+    elif not auto_position_enabled:
+        applied_margin_ratio = float(initial_position_size_ratio)
+        position_sizing_mode = "auto_position_disabled"
     elif unlocked:
         applied_margin_ratio = max(float(initial_position_size_ratio), float(volatility_margin_ratio))
         position_sizing_mode = (
@@ -1322,6 +1376,7 @@ def _build_position_sizing_plan(
         "applied_target_effective_leverage": float(applied_margin_ratio * float(leverage)),
         "initial_position_size_ratio": float(initial_position_size_ratio),
         "position_size_ratio_max": float(position_size_ratio_max),
+        "enable_auto_position": auto_position_enabled,
         "profit_activation_pct": float(profit_activation_pct),
         "position_sizing_activation_pct": float(activation_pct) if activation_pct is not None else None,
         "position_sizing_mode": position_sizing_mode,
@@ -1364,6 +1419,7 @@ def _annotate_volatility_snapshot_with_position_sizing(
     for key in (
         "initial_position_size_ratio",
         "position_size_ratio_max",
+        "enable_auto_position",
         "profit_activation_pct",
         "position_sizing_activation_pct",
         "position_sizing_mode",
@@ -1385,6 +1441,7 @@ def _build_pre_ai_display_volatility_snapshot(
     current_position: Optional[Dict[str, Any]],
     position_episode_state: Any,
     initial_position_size_ratio: float,
+    enable_auto_position: bool,
     profit_activation_pct: float,
     bootstrap_protected: bool,
 ) -> Dict[str, Any]:
@@ -1392,16 +1449,19 @@ def _build_pre_ai_display_volatility_snapshot(
     normalized_episode_state = _normalize_position_episode_state(position_episode_state)
     current_metrics = calculate_position_metrics(current_position)
     current_direction = _normalize_position_episode_direction(current_metrics.get("direction"))
+    auto_position_enabled = bool(enable_auto_position)
 
     keep_current_position_size = bool(
-        bootstrap_protected
+        auto_position_enabled
+        and bootstrap_protected
         and current_direction in {"long", "short"}
     )
-    unlocked = bool(normalized_episode_state["position_sizing_unlocked"])
+    unlocked = bool(normalized_episode_state["position_sizing_unlocked"]) if auto_position_enabled else False
     activation_price = None
     activation_pct = None
     if (
-        normalized_episode_state["initial_entry_price"] is not None
+        auto_position_enabled
+        and normalized_episode_state["initial_entry_price"] is not None
         and normalized_episode_state["initial_entry_direction"] in {"long", "short"}
     ):
         activation_pct = _resolve_position_sizing_activation_pct(
@@ -1414,6 +1474,7 @@ def _build_pre_ai_display_volatility_snapshot(
         )
 
     display_snapshot["initial_position_size_ratio"] = float(initial_position_size_ratio)
+    display_snapshot["enable_auto_position"] = auto_position_enabled
     display_snapshot["profit_activation_pct"] = float(profit_activation_pct)
     display_snapshot["position_sizing_unlocked"] = unlocked
     display_snapshot["keep_current_position_size"] = keep_current_position_size
@@ -2386,6 +2447,7 @@ def run_hakai_cycle(
     trigger_pct_usdt = float(config["trigger_pct_usdt"])
     initial_position_size_ratio = float(config["initial_position_size_ratio"])
     position_size_ratio_max = float(config["position_size_ratio_max"])
+    enable_auto_position = bool(config["enable_auto_position"])
     profit_activation_pct = float(config["profit_activation_pct"])
     stop_loss_account_risk_pct = float(config["stop_loss_pct"])
     resolved_as_of_ms = _safe_int(as_of_ms, 0) or _current_time_ms()
@@ -2396,6 +2458,8 @@ def run_hakai_cycle(
     )
     state_stop_risk_basis = _normalize_stop_risk_basis(previous_state.get("stop_risk_basis"))
     position_episode_state = _normalize_position_episode_state(previous_state)
+    if not enable_auto_position:
+        position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
     position_episode_bootstrapped = False
 
     result: Dict[str, Any] = {
@@ -2484,6 +2548,8 @@ def run_hakai_cycle(
             current_position=current_position,
         )
         position_episode_state = episode_reconcile["position_episode_state"]
+        if not enable_auto_position:
+            position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
         position_episode_bootstrapped = bool(episode_reconcile["bootstrapped"])
         current_position_metrics = calculate_position_metrics(current_position)
         result["position"] = dict(current_position_metrics)
@@ -2529,7 +2595,8 @@ def run_hakai_cycle(
     result["current_price"] = reference_price
     position_episode_state_before_unlock = dict(position_episode_state)
     if (
-        position_episode_state["initial_entry_price"] is not None
+        enable_auto_position
+        and position_episode_state["initial_entry_price"] is not None
         and not bool(position_episode_state["position_sizing_unlocked"])
     ):
         live_window_candles_for_lock_threshold: Optional[list[Dict[str, Any]]] = None
@@ -2556,15 +2623,21 @@ def run_hakai_cycle(
             live_window_candles=live_window_candles_for_lock_threshold,
             live_window_hours=int(config["position_sizing_live_window_hours"]),
         )
-    position_episode_state = _update_position_episode_unlock_state(
-        position_episode_state=position_episode_state,
-        current_position=current_position,
-        reference_price=reference_price,
-        profit_activation_pct=profit_activation_pct,
-    )
-    position_sizing_just_unlocked = _did_position_sizing_just_unlock(
-        previous_position_episode_state=position_episode_state_before_unlock,
-        current_position_episode_state=position_episode_state,
+        position_episode_state = _update_position_episode_unlock_state(
+            position_episode_state=position_episode_state,
+            current_position=current_position,
+            reference_price=reference_price,
+            profit_activation_pct=profit_activation_pct,
+        )
+    elif not enable_auto_position:
+        position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
+    position_sizing_just_unlocked = (
+        _did_position_sizing_just_unlock(
+            previous_position_episode_state=position_episode_state_before_unlock,
+            current_position_episode_state=position_episode_state,
+        )
+        if enable_auto_position
+        else False
     )
 
     stop_sync_result: Optional[Dict[str, Any]] = None
@@ -2766,6 +2839,7 @@ def run_hakai_cycle(
         current_position=current_position,
         position_episode_state=position_episode_state,
         initial_position_size_ratio=initial_position_size_ratio,
+        enable_auto_position=enable_auto_position,
         profit_activation_pct=profit_activation_pct,
         bootstrap_protected=position_episode_bootstrapped,
     )
@@ -2920,6 +2994,7 @@ def run_hakai_cycle(
         leverage=leverage,
         initial_position_size_ratio=initial_position_size_ratio,
         position_size_ratio_max=position_size_ratio_max,
+        enable_auto_position=enable_auto_position,
         profit_activation_pct=profit_activation_pct,
         position_episode_state=position_episode_state,
         bootstrap_protected=position_episode_bootstrapped,
@@ -3094,12 +3169,15 @@ def run_hakai_cycle(
         ),
         execution_action=execution_action,
     )
-    position_episode_state = _refresh_position_episode_lock_threshold(
-        position_episode_state=position_episode_state,
-        profit_activation_pct=profit_activation_pct,
-        live_window_candles=market_context.get("live_window_candles"),
-        live_window_hours=int(config["position_sizing_live_window_hours"]),
-    )
+    if enable_auto_position:
+        position_episode_state = _refresh_position_episode_lock_threshold(
+            position_episode_state=position_episode_state,
+            profit_activation_pct=profit_activation_pct,
+            live_window_candles=market_context.get("live_window_candles"),
+            live_window_hours=int(config["position_sizing_live_window_hours"]),
+        )
+    else:
+        position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
 
     result["success"] = True
     result["action"] = execution_action

@@ -287,8 +287,11 @@ class TradingScheduler:
         is_unlocked = bool(payload.get("position_sizing_unlocked"))
         keep_current_position_size = bool(payload.get("keep_current_position_size"))
         initial_position_size_ratio = payload.get("initial_position_size_ratio")
+        enable_auto_position = bool(payload.get("enable_auto_position", True))
         if keep_current_position_size:
             status_text = "Bootstrap hold"
+        elif not enable_auto_position:
+            status_text = f"Fixed {target_margin_ratio * 100.0:.2f}% (auto off)"
         elif not is_unlocked and activation_price is not None:
             locked_until_text = f"Locked until {self._format_usdt(activation_price, digits=0)}"
             try:

@@ -19,7 +19,7 @@ This system is built on a clear research conclusion: do not ask an LLM to do eve
 
 포지션 사이징은 반대로 최대한 기계적이어야 했습니다. 크랜선이 직접 수행한 연구와 백테스트에서, 현재 최대 레버리지 10배 조건에서는 현재 변동성을 과거 변동성 분포와 비교해 익스포저를 정하는 방식이 가장 좋은 성과를 가져왔고, 이 저장소는 그 결론을 자동매매 로직으로 그대로 옮겼습니다. 즉 Gemini는 방향만 판단하고, 시스템은 현재 24시간 변동성을 과거 일봉 변동성 분포에 대입해 목표 증거금 비율과 실효 레버리지를 계산한 뒤 Binance Futures 제약에 맞는 수량 계산, 포지션 리밸런싱, 손절 동기화까지 자동으로 수행합니다.
 
-Position sizing, by contrast, proved most effective when handled mechanically. In the current runtime, every fresh entry begins from a fixed `0.4` margin usage ratio, records that episode's initial entry price in state, and keeps the volatility-resize lock threshold at the larger of `profit_activation_pct` and the biggest single-candle midpoint range found in the latest rolling 24 one-hour candles while the lock is still active. Once unlocked, the runtime compares the current 24-hour volatility regime against the historical daily distribution, applies a floor at `0.4`, and allows additional scaling up to the configured maximum before carrying the result through exchange-valid quantity planning, position rebalancing, and account-risk-based stop-loss synchronization.
+Position sizing, by contrast, proved most effective when handled mechanically. In the current runtime, every fresh entry begins from a fixed `0.4` margin usage ratio. When `enable_auto_position` is `true`, the runtime records that episode's initial entry price in state, keeps the volatility-resize lock threshold at the larger of `profit_activation_pct` and the biggest single-candle midpoint range found in the latest rolling 24 one-hour candles while the lock is still active, and then allows additional scaling up to the configured maximum after unlock. When `enable_auto_position` is `false`, profit unlock and volatility-based resizing are disabled and the runtime keeps targeting the fixed `initial_position_size_ratio` instead.
 
 - Research-backed role split: the model is used for directional conviction, while sizing and execution remain deterministic and auditable.
 - 연구 기반 역할 분리: 모델은 방향성 확신 판단에만 쓰이고, 사이징과 실행은 결정론적이고 추적 가능한 로직으로 고정됩니다.
@@ -38,7 +38,7 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 | Decision Engine | Gemini returns a structured `LONG` or `SHORT` decision from the latest 100 one-hour candles. |
 | Scheduler | A persistent scheduler manages cycle cadence, state, hourly reporting, and graceful shutdown. |
 | Risk Controls | Fixed leverage, exchange-aware quantity adjustment, min-notional checks, and account-risk-based stop-loss synchronization. |
-| Position Sizing | Fresh entries start at `0.4`, then volatility rank sizing can expand exposure after a profit unlock driven by `max(profit_activation_pct, latest 24h max 1h candle range)`. |
+| Position Sizing | Fresh entries start at `0.4`. With `enable_auto_position: true`, volatility rank sizing can expand exposure after a profit unlock driven by `max(profit_activation_pct, latest 24h max 1h candle range)`. With `false`, the runtime keeps the fixed initial ratio. |
 | Observability | Logs, JSON artifacts, state persistence, and optional Telegram notifications make each cycle reviewable. |
 
 ## Why This Project Stands Out | 이 프로젝트의 강점
@@ -52,8 +52,8 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 - Exchange-aware execution: position sizing and order submission respect Binance Futures constraints such as lot size, tick size, leverage, min notional, reduce-only close logic, and transient API retry handling.
 - 거래소 제약을 반영한 실행: 포지션 크기 계산과 주문 실행은 Binance Futures의 수량 단위, 가격 틱, 레버리지, 최소 주문 금액, reduce-only 청산 로직, 일시적 API 장애 재시도까지 고려합니다.
 
-- Profit-gated volatility resizing: each new position starts at `0.4`, records its initial entry anchor in state, and while still locked keeps the unlock threshold at the larger of the configured floor and the biggest single-candle range inside the latest rolling 24 one-hour candles before allowing volatility-based scaling between `0.4` and `0.98`.
-- 수익 조건부 변동성 사이징: 모든 신규 포지션은 `0.4`에서 시작하고 최초 진입 앵커를 상태에 기록한 뒤, lock 상태에서는 설정된 최소값과 최근 24개 1시간봉 중 최대 단일봉 변동폭 중 더 큰 값을 unlock 기준으로 계속 갱신한 다음에만 `0.4`에서 `0.98` 사이의 변동성 기반 증액을 허용합니다.
+- Configurable sizing mode: with `enable_auto_position: true`, each new position starts at `0.4`, records its initial entry anchor in state, and only then allows volatility-based scaling between `0.4` and `0.98` after the live profit gate unlocks. With `false`, the system keeps the fixed `initial_position_size_ratio`.
+- 설정 가능한 사이징 모드: `enable_auto_position: true` 이면 모든 신규 포지션이 `0.4`에서 시작하고 최초 진입 앵커를 상태에 기록한 뒤, 실시간 수익 unlock 조건을 통과해야만 `0.4`에서 `0.98` 사이의 변동성 기반 증액을 허용합니다. `false` 이면 시스템은 `initial_position_size_ratio` 고정 비중을 유지합니다.
 
 - Auditability by design: every AI-triggered cycle can leave behind structured artifacts such as prompt input, AI output, and final cycle output, making the system explainable to reviewers and maintainers.
 - 설계 차원의 추적 가능성: AI가 개입한 각 사이클은 프롬프트 입력, AI 출력, 최종 실행 결과를 JSON으로 남길 수 있어, 리뷰어와 유지보수자가 흐름을 추적하고 설명하기 쉽습니다.
@@ -102,8 +102,8 @@ flowchart LR
 3. If there is an existing position, the system first verifies and synchronizes stop-loss protection from the stored account-risk basis.
    기존 포지션이 있으면 먼저 저장된 계좌 리스크 기준으로 손절 보호 주문 상태를 점검하고 동기화합니다.
 
-4. The trigger engine decides whether the latest price move is large enough to justify a fresh AI decision, and it also forces an AI cycle immediately when the profit-gated sizing lock unlocks.
-   트리거 엔진은 최근 가격 변동이 새로운 AI 판단을 요청할 만큼 충분한지 판정하고, 수익 조건부 사이징 lock 이 해제되는 순간에도 즉시 AI 사이클을 강제 실행합니다.
+4. The trigger engine decides whether the latest price move is large enough to justify a fresh AI decision, and when `enable_auto_position` is `true` it also forces an AI cycle immediately when the profit-gated sizing lock unlocks.
+   트리거 엔진은 최근 가격 변동이 새로운 AI 판단을 요청할 만큼 충분한지 판정하고, `enable_auto_position` 이 `true` 인 경우에는 수익 조건부 사이징 lock 이 해제되는 순간에도 즉시 AI 사이클을 강제 실행합니다.
 
 5. If neither a price trigger nor an unlock trigger is reached, the system updates state and exits the cycle without unnecessary AI cost.
    가격 트리거나 unlock 트리거가 모두 충족되지 않으면 상태만 갱신하고 AI 비용을 발생시키지 않은 채 사이클을 종료합니다.
@@ -114,8 +114,8 @@ flowchart LR
 7. Gemini receives structured market context and returns a strict `LONG` or `SHORT` decision.
    Gemini는 구조화된 시장 컨텍스트를 받아 엄격한 `LONG` 또는 `SHORT` 결정을 반환합니다.
 
-8. The system starts fresh entries at `0.4`, then while the lock is active keeps the unlock threshold at `max(profit_activation_pct, latest rolling 24h max 1h candle range)` before allowing volatility-based target exposure.
-   시스템은 신규 진입을 `0.4`에서 시작하고, lock 이 유지되는 동안에는 `profit_activation_pct` 와 최근 롤링 24개 1시간봉 중 최대 단일봉 변동폭 중 더 큰 값을 unlock 기준으로 계속 갱신한 뒤에만 변동성 기반 목표 익스포저를 허용합니다.
+8. The system starts fresh entries at `0.4`. With `enable_auto_position: true`, while the lock is active it keeps the unlock threshold at `max(profit_activation_pct, latest rolling 24h max 1h candle range)` before allowing volatility-based target exposure. With `false`, it simply keeps targeting the fixed `initial_position_size_ratio`.
+   시스템은 신규 진입을 `0.4`에서 시작합니다. `enable_auto_position: true` 이면 lock 이 유지되는 동안 `profit_activation_pct` 와 최근 롤링 24개 1시간봉 중 최대 단일봉 변동폭 중 더 큰 값을 unlock 기준으로 계속 갱신한 뒤에만 변동성 기반 목표 익스포저를 허용합니다. `false` 이면 `initial_position_size_ratio` 고정 비중을 그대로 유지합니다.
 
 9. Based on the AI direction and the current position state, the system may open, reverse, scale in, or scale out.
    AI 방향과 현재 포지션 상태에 따라 신규 진입, 반전, 증액, 축소가 실행될 수 있습니다.
@@ -237,6 +237,7 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 | `position_sizing_daily_sample_days` | Number of closed daily candles used for volatility rank sampling. The runtime fetches `sample_days + 2` daily candles to exclude the in-progress candle safely. | `25` |
 | `position_sizing_live_window_hours` | Number of recent 1-hour candles used to measure live volatility. | `24` |
 | `initial_position_size_ratio` | Fixed margin usage ratio used for a fresh entry or reversal before any volatility-based add-on sizing is allowed. | `0.4` |
+| `enable_auto_position` | Enables the profit-unlock plus volatility-based add-on sizing flow. When disabled, the runtime keeps targeting `initial_position_size_ratio`. | `true` |
 | `profit_activation_pct` | Minimum favorable move floor for unlocking volatility-based resizing. While locked, the runtime uses the larger of this value and the biggest single-candle midpoint range from the latest 24 one-hour candles. | `0.01` |
 | `position_size_ratio_max` | Upper bound on the margin usage ratio. With the default 25-day sample, rank `25` maps to this value. | `0.98` |
 | `gemini_api_version` | Optional runtime config key with a default in code. | `v1beta` by default |
@@ -249,8 +250,8 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 - A higher `cycle_interval_seconds` reduces operational frequency and API activity.
 - `cycle_interval_seconds`가 높을수록 운영 빈도와 API 호출 빈도가 줄어듭니다.
 
-- `fixed_leverage`, `initial_position_size_ratio`, and `position_size_ratio_max` directly shape risk exposure.
-- `fixed_leverage`, `initial_position_size_ratio`, `position_size_ratio_max`는 실제 위험 노출 수준에 직접 영향을 줍니다.
+- `fixed_leverage`, `initial_position_size_ratio`, `enable_auto_position`, and `position_size_ratio_max` directly shape risk exposure.
+- `fixed_leverage`, `initial_position_size_ratio`, `enable_auto_position`, `position_size_ratio_max`는 실제 위험 노출 수준에 직접 영향을 줍니다.
 
 - `stop_loss_pct` defines the account-level risk budget used to derive the live stop-loss distance from position size and leverage.
 - `stop_loss_pct`는 포지션 비중과 레버리지로부터 실제 손절 거리를 계산할 때 쓰는 계좌 기준 리스크 예산입니다.
@@ -258,8 +259,8 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 - Volatility sizing fields determine how adaptive the system becomes under calm versus fast markets.
 - 변동성 사이징 관련 값들은 조용한 시장과 급변하는 시장에서 시스템이 얼마나 유연하게 대응하는지를 결정합니다.
 
-- With the default sizing model, the runtime still ranks current 24-hour volatility against the latest 25 closed daily candles and derives a volatility ratio up to `0.98`, but fresh entries remain fixed at `0.4` until the recorded initial entry reaches the live unlock threshold computed from `max(profit_activation_pct, latest rolling 24h max 1h candle range)`. When that unlock threshold is reached, the runtime immediately forces the normal AI cycle so the post-AI sizing and execution flow can rebalance in the same path.
-- 기본 사이징 모델에서는 현재 24시간 변동성을 최근 종료된 25개 일봉과 비교해 최대 `0.98`까지의 변동성 비율을 계산하지만, 실제 신규 진입은 기록된 최초 진입이 `max(profit_activation_pct, 최근 롤링 24개 1시간봉 중 최대 단일봉 변동폭)` 으로 계산된 실시간 unlock 조건에 도달하기 전까지 `0.4`로 고정됩니다. 이 unlock 조건에 도달하면 런타임은 기존 AI 사이클을 즉시 강제 실행해, AI 판단 이후의 사이징 및 실행 흐름이 동일한 경로에서 바로 이어지도록 합니다.
+- With `enable_auto_position: true`, the runtime still ranks current 24-hour volatility against the latest 25 closed daily candles and derives a volatility ratio up to `0.98`, but fresh entries remain fixed at `0.4` until the recorded initial entry reaches the live unlock threshold computed from `max(profit_activation_pct, latest rolling 24h max 1h candle range)`. When that unlock threshold is reached, the runtime immediately forces the normal AI cycle so the post-AI sizing and execution flow can rebalance in the same path.
+- `enable_auto_position: false` 이면 현재 24시간 변동성 랭크는 관측과 로그용으로 계속 계산되더라도, 실제 목표 비중은 `initial_position_size_ratio` 로 고정되고 unlock 강제 트리거도 발생하지 않습니다.
 
 ## How to Run | 실행 방법
 
