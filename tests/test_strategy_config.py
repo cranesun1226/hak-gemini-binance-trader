@@ -11,7 +11,7 @@ class StrategyConfigTests(unittest.TestCase):
 
         self.assertEqual(config["ai_prompt_timeframe"], "1h")
         self.assertEqual(config["ai_prompt_candle_count"], 100)
-        self.assertEqual(config["trigger_pct_usdt"], 1.0)
+        self.assertEqual(config["trigger_pct_usdt"], 0.75)
         self.assertTrue(config["enable_auto_position"])
 
     @patch("src.strategy.hakai_strategy.load_runtime_config", return_value={"ai_candle_count_per_timeframe": 48})

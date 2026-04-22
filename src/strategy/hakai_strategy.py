@@ -46,6 +46,7 @@ from src.strategy.runtime_config import (
     DEFAULT_POSITION_SIZE_RATIO_MAX,
     DEFAULT_POSITION_SIZE_RATIO_MIN,
     DEFAULT_PROFIT_ACTIVATION_PCT,
+    DEFAULT_TRIGGER_PCT_USDT,
     load_runtime_config,
 )
 
@@ -242,7 +243,10 @@ def _load_strategy_config() -> Dict[str, Any]:
     return {
         "symbol": symbol,
         "cycle_interval_seconds": _normalize_positive_int(raw.get("cycle_interval_seconds", 60), 60),
-        "trigger_pct_usdt": _normalize_trigger_percent(raw.get("trigger_pct_usdt", 1.0), 1.0),
+        "trigger_pct_usdt": _normalize_trigger_percent(
+            raw.get("trigger_pct_usdt", DEFAULT_TRIGGER_PCT_USDT),
+            DEFAULT_TRIGGER_PCT_USDT,
+        ),
         "fixed_leverage": _normalize_positive_int(raw.get("fixed_leverage", 10), 10),
         "stop_loss_pct": _normalize_ratio(raw.get("stop_loss_pct", 0.04), 0.04),
         "ai_prompt_timeframe": _normalize_ai_prompt_timeframe(
