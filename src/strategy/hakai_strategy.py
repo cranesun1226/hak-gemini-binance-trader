@@ -207,33 +207,10 @@ def _load_strategy_config() -> Dict[str, Any]:
         logger.warning("Forcing symbol=%s to BTCUSDT-only runtime", symbol)
         symbol = DEFAULT_SYMBOL
 
-    enable_auto_position = _normalize_bool(
-        raw.get("enable_auto_position", DEFAULT_ENABLE_AUTO_POSITION),
-        DEFAULT_ENABLE_AUTO_POSITION,
-    )
     initial_position_size_ratio = _normalize_ratio(
         raw.get("initial_position_size_ratio", DEFAULT_INITIAL_POSITION_SIZE_RATIO),
         DEFAULT_INITIAL_POSITION_SIZE_RATIO,
     )
-    position_size_ratio_max = _normalize_ratio(
-        raw.get("position_size_ratio_max", DEFAULT_POSITION_SIZE_RATIO_MAX),
-        DEFAULT_POSITION_SIZE_RATIO_MAX,
-    )
-    profit_activation_pct = _normalize_activation_ratio(
-        raw.get("profit_activation_pct", DEFAULT_PROFIT_ACTIVATION_PCT),
-        DEFAULT_PROFIT_ACTIVATION_PCT,
-    )
-    if position_size_ratio_max <= initial_position_size_ratio:
-        if enable_auto_position:
-            logger.warning(
-                "Invalid position size ratio bounds initial=%s max=%s; using defaults",
-                raw.get("initial_position_size_ratio"),
-                raw.get("position_size_ratio_max"),
-            )
-            initial_position_size_ratio = DEFAULT_INITIAL_POSITION_SIZE_RATIO
-            position_size_ratio_max = DEFAULT_POSITION_SIZE_RATIO_MAX
-        else:
-            position_size_ratio_max = float(max(position_size_ratio_max, initial_position_size_ratio))
 
     ai_prompt_candle_count = _normalize_positive_int(
         raw.get("ai_prompt_candle_count", raw.get("ai_candle_count_per_timeframe", DEFAULT_AI_PROMPT_CANDLE_COUNT)),
@@ -253,18 +230,7 @@ def _load_strategy_config() -> Dict[str, Any]:
             raw.get("ai_prompt_timeframe", DEFAULT_AI_PROMPT_TIMEFRAME)
         ),
         "ai_prompt_candle_count": ai_prompt_candle_count,
-        "position_sizing_daily_sample_days": _normalize_positive_int(
-            raw.get("position_sizing_daily_sample_days", DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS),
-            DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
-        ),
-        "position_sizing_live_window_hours": _normalize_positive_int(
-            raw.get("position_sizing_live_window_hours", DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS),
-            DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
-        ),
         "initial_position_size_ratio": float(initial_position_size_ratio),
-        "enable_auto_position": bool(enable_auto_position),
-        "profit_activation_pct": float(profit_activation_pct),
-        "position_size_ratio_max": float(position_size_ratio_max),
         "gemini_api_version": str(raw.get("gemini_api_version") or _DEFAULT_GEMINI_API_VERSION).strip()
         or _DEFAULT_GEMINI_API_VERSION,
         "gemini_thinking_level": _normalize_gemini_thinking_level(raw.get("gemini_thinking_level")),
@@ -546,16 +512,12 @@ def _fetch_prompt_market_context(
     symbol: str,
     ai_prompt_timeframe: str,
     ai_prompt_candle_count: int,
-    position_sizing_daily_sample_days: int,
-    position_sizing_live_window_hours: int,
     as_of_ms: Optional[int],
 ) -> Dict[str, Any]:
     resolved_ai_prompt_timeframe = _normalize_ai_prompt_timeframe(ai_prompt_timeframe)
     resolved_ai_prompt_candle_count = max(1, int(ai_prompt_candle_count))
-    resolved_position_sizing_daily_sample_days = max(1, int(position_sizing_daily_sample_days))
-    resolved_position_sizing_live_window_hours = max(1, int(position_sizing_live_window_hours))
     resolved_as_of_ms = _resolve_as_of_ms(as_of_ms)
-    prompt_fetch_limit = max(resolved_ai_prompt_candle_count, resolved_position_sizing_live_window_hours)
+    prompt_fetch_limit = resolved_ai_prompt_candle_count + 2
     raw_prompt_klines = fetch_klines(
         symbol,
         resolved_ai_prompt_timeframe,
@@ -563,45 +525,24 @@ def _fetch_prompt_market_context(
         as_of_ms=resolved_as_of_ms,
     )
     prompt_candles = parse_klines(raw_prompt_klines)
-    if len(prompt_candles) < prompt_fetch_limit:
-        raise ValueError(
-            f"not enough candles for {symbol} {resolved_ai_prompt_timeframe}: "
-            f"have={len(prompt_candles)} need={prompt_fetch_limit}"
-        )
-
-    timeframe_payload: Dict[str, list[list[float]]] = {
-        resolved_ai_prompt_timeframe: _serialize_ohlcv_rows(
-            prompt_candles,
-            limit=resolved_ai_prompt_candle_count,
-        )
-    }
-    live_window_candles = prompt_candles[-resolved_position_sizing_live_window_hours:]
-
-    daily_fetch_limit = resolved_position_sizing_daily_sample_days + 2
-    raw_daily_klines = fetch_klines(symbol, "1d", daily_fetch_limit, as_of_ms=resolved_as_of_ms)
-    daily_candles = parse_klines(raw_daily_klines)
-    if len(daily_candles) < daily_fetch_limit:
-        raise ValueError(
-            f"not enough candles for {symbol} 1d: have={len(daily_candles)} need={daily_fetch_limit}"
-        )
-    daily_position_sizing_candles = _select_closed_candles(
-        daily_candles,
-        interval="1d",
-        limit=resolved_position_sizing_daily_sample_days,
+    closed_prompt_candles = _select_closed_candles(
+        prompt_candles,
+        interval=resolved_ai_prompt_timeframe,
+        limit=resolved_ai_prompt_candle_count,
         as_of_ms=resolved_as_of_ms,
     )
 
-    if len(live_window_candles) < resolved_position_sizing_live_window_hours:
-        raise ValueError("1h candles unavailable for live window calculation")
-    if len(daily_position_sizing_candles) < resolved_position_sizing_daily_sample_days:
-        raise ValueError("1d candles unavailable for rank-based position sizing")
+    timeframe_payload: Dict[str, list[list[float]]] = {
+        resolved_ai_prompt_timeframe: _serialize_ohlcv_rows(
+            closed_prompt_candles,
+            limit=resolved_ai_prompt_candle_count,
+        )
+    }
 
     return {
         "timeframes": timeframe_payload,
         "ai_prompt_timeframe": resolved_ai_prompt_timeframe,
         "ai_prompt_candle_count": resolved_ai_prompt_candle_count,
-        "daily_position_sizing_candles": daily_position_sizing_candles,
-        "live_window_candles": live_window_candles,
     }
 
 
@@ -942,6 +883,22 @@ def _calculate_target_notional(
     leverage: int,
 ) -> float:
     return float(account_equity * target_margin_ratio * float(leverage))
+
+
+def _build_fixed_position_sizing(
+    *,
+    initial_position_size_ratio: float,
+    leverage: int,
+) -> Dict[str, float | str]:
+    target_margin_ratio = float(initial_position_size_ratio)
+    return {
+        "position_sizing_mode": "fixed_ratio",
+        "applied_target_margin_ratio": target_margin_ratio,
+        "target_margin_ratio": target_margin_ratio,
+        "applied_target_effective_leverage": float(target_margin_ratio * float(leverage)),
+        "target_effective_leverage": float(target_margin_ratio * float(leverage)),
+        "initial_position_size_ratio": target_margin_ratio,
+    }
 
 
 def _format_percentile_sizing_summary(snapshot: Optional[Dict[str, Any]]) -> str:
@@ -1975,6 +1932,13 @@ def _build_state_update(
 ) -> Dict[str, Any]:
     state_update = dict(previous_state or {})
     state_update.pop("last_ai_trigger_round_price", None)
+    state_update.pop("initial_entry_price", None)
+    state_update.pop("initial_entry_direction", None)
+    state_update.pop("position_sizing_activation_pct", None)
+    state_update.pop("position_sizing_activation_price", None)
+    state_update.pop("position_sizing_unlocked", None)
+    state_update.pop("position_sizing_activated_at", None)
+    state_update.pop("last_hourly_resize_slot", None)
     state_update["trigger_pct_usdt"] = float(trigger_pct_usdt)
     if ai_triggered:
         state_update["last_ai_trigger_price"] = trigger_price
@@ -1986,14 +1950,7 @@ def _build_state_update(
         state_update["next_trigger_down"] = next_trigger_down
     if next_trigger_up is not None:
         state_update["next_trigger_up"] = next_trigger_up
-    if position_episode_state is not _STATE_UNSET:
-        normalized_position_episode_state = _normalize_position_episode_state(position_episode_state)
-        state_update["initial_entry_price"] = normalized_position_episode_state["initial_entry_price"]
-        state_update["initial_entry_direction"] = normalized_position_episode_state["initial_entry_direction"]
-        state_update["position_sizing_activation_pct"] = normalized_position_episode_state["position_sizing_activation_pct"]
-        state_update["position_sizing_activation_price"] = normalized_position_episode_state["position_sizing_activation_price"]
-        state_update["position_sizing_unlocked"] = normalized_position_episode_state["position_sizing_unlocked"]
-        state_update["position_sizing_activated_at"] = normalized_position_episode_state["position_sizing_activated_at"]
+    del position_episode_state
     if stop_risk_basis is not _STATE_UNSET:
         normalized_stop_risk_basis = _normalize_stop_risk_basis(stop_risk_basis)
         state_update["stop_risk_basis"] = (
@@ -2424,9 +2381,6 @@ def run_hakai_cycle(
     leverage = int(config["fixed_leverage"])
     trigger_pct_usdt = float(config["trigger_pct_usdt"])
     initial_position_size_ratio = float(config["initial_position_size_ratio"])
-    position_size_ratio_max = float(config["position_size_ratio_max"])
-    enable_auto_position = bool(config["enable_auto_position"])
-    profit_activation_pct = float(config["profit_activation_pct"])
     stop_loss_account_risk_pct = float(config["stop_loss_pct"])
     resolved_as_of_ms = _safe_int(as_of_ms, 0) or _current_time_ms()
     raw_previous_state = dict(state or {})
@@ -2435,10 +2389,10 @@ def run_hakai_cycle(
         trigger_pct_usdt,
     )
     state_stop_risk_basis = _normalize_stop_risk_basis(previous_state.get("stop_risk_basis"))
-    position_episode_state = _normalize_position_episode_state(previous_state)
-    if not enable_auto_position:
-        position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
-    position_episode_bootstrapped = False
+    fixed_position_sizing = _build_fixed_position_sizing(
+        initial_position_size_ratio=initial_position_size_ratio,
+        leverage=leverage,
+    )
 
     result: Dict[str, Any] = {
         "success": False,
@@ -2452,7 +2406,6 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=None,
             next_trigger_up=None,
-            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         ),
         "ai_triggered": False,
@@ -2465,8 +2418,7 @@ def run_hakai_cycle(
         "cycle_dir": None,
         "position": None,
         "position_before": None,
-        "volatility_snapshot": None,
-        "position_sizing": None,
+        "position_sizing": dict(fixed_position_sizing),
         "stop_risk_basis": dict(state_stop_risk_basis) if state_stop_risk_basis is not None else None,
     }
     logger.debug(
@@ -2482,6 +2434,7 @@ def run_hakai_cycle(
                 "previous_last_ai_trigger_price": previous_state.get("last_ai_trigger_price"),
                 "previous_next_trigger_down": previous_state.get("next_trigger_down"),
                 "previous_next_trigger_up": previous_state.get("next_trigger_up"),
+                "initial_position_size_ratio": initial_position_size_ratio,
             }
         ),
     )
@@ -2521,14 +2474,6 @@ def run_hakai_cycle(
     current_position = _extract_managed_position(positions, symbol)
     has_position = isinstance(current_position, dict)
     if has_position and current_position is not None:
-        episode_reconcile = _reconcile_position_episode_state(
-            previous_state=previous_state,
-            current_position=current_position,
-        )
-        position_episode_state = episode_reconcile["position_episode_state"]
-        if not enable_auto_position:
-            position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
-        position_episode_bootstrapped = bool(episode_reconcile["bootstrapped"])
         current_position_metrics = calculate_position_metrics(current_position)
         result["position"] = dict(current_position_metrics)
         result["position_before"] = dict(current_position_metrics)
@@ -2539,7 +2484,6 @@ def run_hakai_cycle(
             result["position"] = _enrich_position_with_stop_risk(result.get("position"), state_stop_risk_basis)
             result["position_before"] = _enrich_position_with_stop_risk(result.get("position_before"), state_stop_risk_basis)
     else:
-        position_episode_state = _empty_position_episode_state()
         state_stop_risk_basis = None
         result["stop_risk_basis"] = None
     result["state_update"] = _build_state_update(
@@ -2550,7 +2494,6 @@ def run_hakai_cycle(
         ai_decision=None,
         next_trigger_down=None,
         next_trigger_up=None,
-        position_episode_state=position_episode_state,
         stop_risk_basis=state_stop_risk_basis,
     )
     logger.debug(
@@ -2571,43 +2514,6 @@ def run_hakai_cycle(
         return result
 
     result["current_price"] = reference_price
-    if (
-        enable_auto_position
-        and position_episode_state["initial_entry_price"] is not None
-        and not bool(position_episode_state["position_sizing_unlocked"])
-    ):
-        live_window_candles_for_lock_threshold: Optional[list[Dict[str, Any]]] = None
-        try:
-            live_window_candles_for_lock_threshold = _fetch_position_sizing_live_window_candles(
-                symbol=symbol,
-                live_window_hours=int(config["position_sizing_live_window_hours"]),
-                as_of_ms=resolved_as_of_ms,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to refresh locked position sizing activation threshold; keeping prior threshold | %s",
-                format_log_details(
-                    {
-                        "symbol": symbol,
-                        "error": str(exc),
-                    }
-                ),
-            )
-
-        position_episode_state = _refresh_position_episode_lock_threshold(
-            position_episode_state=position_episode_state,
-            profit_activation_pct=profit_activation_pct,
-            live_window_candles=live_window_candles_for_lock_threshold,
-            live_window_hours=int(config["position_sizing_live_window_hours"]),
-        )
-        position_episode_state = _update_position_episode_unlock_state(
-            position_episode_state=position_episode_state,
-            current_position=current_position,
-            reference_price=reference_price,
-            profit_activation_pct=profit_activation_pct,
-        )
-    elif not enable_auto_position:
-        position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
 
     stop_sync_result: Optional[Dict[str, Any]] = None
     prefetched_account_equity: Optional[float] = None
@@ -2694,7 +2600,6 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         logger.debug(
@@ -2711,41 +2616,6 @@ def run_hakai_cycle(
             ),
         )
         return result
-
-    if current_position is None:
-        initial_entry_volatility_cooldown = _evaluate_initial_entry_volatility_cooldown(
-            symbol=symbol,
-            as_of_ms=resolved_as_of_ms,
-        )
-        result["initial_entry_volatility_cooldown"] = initial_entry_volatility_cooldown
-        if bool(initial_entry_volatility_cooldown.get("cooldown_active")):
-            result["success"] = True
-            result["action"] = "hold_volatility_cooldown"
-            result["state_update"] = _build_state_update(
-                previous_state=previous_state,
-                trigger_pct_usdt=trigger_pct_usdt,
-                ai_triggered=False,
-                trigger_price=None,
-                ai_decision=None,
-                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
-                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-                position_episode_state=position_episode_state,
-                stop_risk_basis=state_stop_risk_basis,
-            )
-            logger.info(
-                "Initial entry paused by 1h volatility cool down | %s",
-                format_log_details(
-                    {
-                        "symbol": symbol,
-                        "current_price": reference_price,
-                        "trigger_reason": trigger_info.get("reason"),
-                        "threshold_pct": initial_entry_volatility_cooldown.get("threshold_pct"),
-                        "max_range_pct": initial_entry_volatility_cooldown.get("max_range_pct"),
-                        "breached_candles": initial_entry_volatility_cooldown.get("breached_candle_labels"),
-                    }
-                ),
-            )
-            return result
 
     cycle_dir = _create_cycle_dir()
     result["cycle_dir"] = cycle_dir
@@ -2766,19 +2636,8 @@ def run_hakai_cycle(
         symbol=symbol,
         ai_prompt_timeframe=str(config["ai_prompt_timeframe"]),
         ai_prompt_candle_count=int(config["ai_prompt_candle_count"]),
-        position_sizing_daily_sample_days=int(config["position_sizing_daily_sample_days"]),
-        position_sizing_live_window_hours=int(config["position_sizing_live_window_hours"]),
         as_of_ms=resolved_as_of_ms,
     )
-    volatility_snapshot = _calculate_volatility_snapshot(
-        market_context["daily_position_sizing_candles"],
-        daily_sample_days=int(config["position_sizing_daily_sample_days"]),
-        live_window_candles=market_context["live_window_candles"],
-        live_window_hours=int(config["position_sizing_live_window_hours"]),
-        leverage=leverage,
-        position_size_ratio_max=position_size_ratio_max,
-    )
-    result["volatility_snapshot"] = volatility_snapshot
     logger.info(
         "Market context prepared for AI | %s",
         format_log_details(
@@ -2788,18 +2647,9 @@ def run_hakai_cycle(
                 "ai_prompt_timeframes": {key: len(value) for key, value in market_context["timeframes"].items()},
                 "ai_prompt_timeframe": market_context.get("ai_prompt_timeframe"),
                 "ai_prompt_candle_count": market_context.get("ai_prompt_candle_count"),
-                "volatility_snapshot": volatility_snapshot,
+                "position_sizing": fixed_position_sizing,
             }
         ),
-    )
-    display_volatility_snapshot = _build_pre_ai_display_volatility_snapshot(
-        volatility_snapshot=volatility_snapshot,
-        current_position=current_position,
-        position_episode_state=position_episode_state,
-        initial_position_size_ratio=initial_position_size_ratio,
-        enable_auto_position=enable_auto_position,
-        profit_activation_pct=profit_activation_pct,
-        bootstrap_protected=position_episode_bootstrapped,
     )
 
     prompt_position_snapshot = _fetch_live_prompt_position_snapshot(
@@ -2833,7 +2683,7 @@ def run_hakai_cycle(
             "next_trigger_up": result.get("next_trigger_up"),
             "position": result.get("position_before"),
             "previous_ai_decision": previous_state.get("last_ai_decision"),
-            "volatility_snapshot": display_volatility_snapshot,
+            "position_sizing": dict(fixed_position_sizing),
         },
     )
 
@@ -2859,7 +2709,6 @@ def run_hakai_cycle(
             ai_decision=None,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _emit_notification(
@@ -2874,7 +2723,7 @@ def run_hakai_cycle(
                 "trigger_reason": trigger_info.get("reason"),
                 "decision": None,
                 "analysis": dict(ai_analysis),
-                "volatility_snapshot": volatility_snapshot,
+                "position_sizing": dict(fixed_position_sizing),
             },
         )
         _persist_cycle_output(result)
@@ -2920,7 +2769,7 @@ def run_hakai_cycle(
             "trigger_reason": trigger_info.get("reason"),
             "decision": ai_decision.decision,
             "analysis": dict(ai_analysis),
-            "volatility_snapshot": volatility_snapshot,
+            "position_sizing": dict(fixed_position_sizing),
             "position": result.get("position_before"),
         },
     )
@@ -2938,50 +2787,29 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
         return result
 
-    position_sizing_plan = _build_position_sizing_plan(
-        volatility_snapshot=volatility_snapshot,
-        current_position=current_position,
-        decision=ai_decision.decision,
-        reference_price=reference_price,
-        leverage=leverage,
-        initial_position_size_ratio=initial_position_size_ratio,
-        position_size_ratio_max=position_size_ratio_max,
-        enable_auto_position=enable_auto_position,
-        profit_activation_pct=profit_activation_pct,
-        position_episode_state=position_episode_state,
-        bootstrap_protected=position_episode_bootstrapped,
-    )
-    result["position_sizing"] = dict(position_sizing_plan)
-    volatility_snapshot = _annotate_volatility_snapshot_with_position_sizing(
-        volatility_snapshot=volatility_snapshot,
-        position_sizing_plan=position_sizing_plan,
-    )
-    result["volatility_snapshot"] = volatility_snapshot
-    target_notional_usdt = _resolve_target_notional_usdt(
+    target_notional_usdt = _calculate_target_notional(
         account_equity=account_equity,
+        target_margin_ratio=initial_position_size_ratio,
         leverage=leverage,
-        current_position=current_position,
-        position_sizing_plan=position_sizing_plan,
     )
     result["account_equity"] = account_equity
     result["target_notional_usdt"] = target_notional_usdt
+    result["position_sizing"] = dict(fixed_position_sizing)
     logger.info(
-        "Position sizing computed | %s",
+        "Fixed position sizing computed | %s",
         format_log_details(
             {
                 "symbol": symbol,
                 "account_equity": account_equity,
-                "target_margin_ratio": volatility_snapshot.get("target_margin_ratio"),
-                "target_effective_leverage": volatility_snapshot.get("target_effective_leverage"),
+                "target_margin_ratio": fixed_position_sizing.get("target_margin_ratio"),
+                "target_effective_leverage": fixed_position_sizing.get("target_effective_leverage"),
                 "target_notional_usdt": target_notional_usdt,
-                "position_sizing": position_sizing_plan,
-                "sizing_summary": _format_percentile_sizing_summary(volatility_snapshot),
+                "position_sizing": fixed_position_sizing,
             }
         ),
     )
@@ -2997,7 +2825,6 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
@@ -3005,6 +2832,10 @@ def run_hakai_cycle(
 
     leverage = int(applied_leverage)
     result["applied_leverage"] = leverage
+    result["position_sizing"] = _build_fixed_position_sizing(
+        initial_position_size_ratio=initial_position_size_ratio,
+        leverage=leverage,
+    )
     logger.info(
         "Leverage confirmed | %s",
         format_log_details(
@@ -3058,7 +2889,6 @@ def run_hakai_cycle(
             ai_decision=ai_decision.decision,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-            position_episode_state=position_episode_state,
             stop_risk_basis=state_stop_risk_basis,
         )
         _persist_cycle_output(result)
@@ -3115,28 +2945,6 @@ def run_hakai_cycle(
         state_stop_risk_basis = None
         result["stop_risk_basis"] = None
 
-    position_episode_state = _resolve_post_trade_position_episode_state(
-        previous_position_episode_state=position_episode_state,
-        previous_position=current_position,
-        current_position=(
-            synced_position
-            if synced_position is not None
-            else current_position
-            if execution_action in {"kept_position_size", "skipped_scale_in_below_min_notional"}
-            else None
-        ),
-        execution_action=execution_action,
-    )
-    if enable_auto_position:
-        position_episode_state = _refresh_position_episode_lock_threshold(
-            position_episode_state=position_episode_state,
-            profit_activation_pct=profit_activation_pct,
-            live_window_candles=market_context.get("live_window_candles"),
-            live_window_hours=int(config["position_sizing_live_window_hours"]),
-        )
-    else:
-        position_episode_state = _clear_position_episode_sizing_state(position_episode_state)
-
     result["success"] = True
     result["action"] = execution_action
     result["state_update"] = _build_state_update(
@@ -3147,7 +2955,6 @@ def run_hakai_cycle(
         ai_decision=ai_decision.decision,
         next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
         next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-        position_episode_state=position_episode_state,
         stop_risk_basis=state_stop_risk_basis,
     )
 

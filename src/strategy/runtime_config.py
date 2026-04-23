@@ -21,7 +21,7 @@ CONFIG_PATH = os.path.join(ROOT_DIR, "setting.yaml")
 # Runtime defaults live here so optional keys can be omitted from setting.yaml.
 DEFAULT_GEMINI_API_VERSION = "v1beta"
 DEFAULT_GEMINI_THINKING_LEVEL = "high"
-DEFAULT_AI_PROMPT_TIMEFRAME = "1h"
+DEFAULT_AI_PROMPT_TIMEFRAME = "15m"
 DEFAULT_AI_PROMPT_CANDLE_COUNT = 100
 DEFAULT_TRIGGER_PCT_USDT = 0.75
 DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS = 25
@@ -40,12 +40,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "stop_loss_pct": 0.04,
     "ai_prompt_timeframe": DEFAULT_AI_PROMPT_TIMEFRAME,
     "ai_prompt_candle_count": DEFAULT_AI_PROMPT_CANDLE_COUNT,
-    "position_sizing_daily_sample_days": DEFAULT_POSITION_SIZING_DAILY_SAMPLE_DAYS,
-    "position_sizing_live_window_hours": DEFAULT_POSITION_SIZING_LIVE_WINDOW_HOURS,
     "initial_position_size_ratio": DEFAULT_INITIAL_POSITION_SIZE_RATIO,
-    "enable_auto_position": DEFAULT_ENABLE_AUTO_POSITION,
-    "profit_activation_pct": DEFAULT_PROFIT_ACTIVATION_PCT,
-    "position_size_ratio_max": DEFAULT_POSITION_SIZE_RATIO_MAX,
     "gemini_api_version": DEFAULT_GEMINI_API_VERSION,
     "gemini_thinking_level": DEFAULT_GEMINI_THINKING_LEVEL,
 }

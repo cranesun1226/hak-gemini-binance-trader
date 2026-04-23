@@ -3,9 +3,9 @@
 ## "어떻게 LLM을 트레이딩에 활용할 것인지에 대한 크랜선의 대답"
 “Crane Sun's answer on how to utilize LLMs in trading”
 
-HAK GEMINI BINANCE TRADER는 변동성 기반 포지션 사이징, Gemini 기반 방향성 판단, 가격 기준 재평가 트리거, 거래소 제약을 반영한 주문 실행 등 Investing AI PO "크랜선"의 3년 간의 LLM 기반 코인 트레이딩 노하우를 녹여 제작한 BTC/USDT 선물 트레이딩 자동화 시스템입니다.
+HAK GEMINI BINANCE TRADER는 고정 포지션 사이징, Gemini 기반 방향성 판단, 가격 기준 재평가 트리거, 거래소 제약을 반영한 주문 실행 등 Investing AI PO "크랜선"의 3년 간의 LLM 기반 코인 트레이딩 노하우를 녹여 제작한 BTC/USDT 선물 트레이딩 자동화 시스템입니다.
 
-HAK GEMINI BINANCE TRADER is an automated BTC/USDT futures trading system developed by incorporating Investing AI PO “Crane Sun”’s three years of LLM-based cryptocurrency trading expertise, including volatility-based position sizing, Gemini-based trend analysis, price-triggered re-evaluation, and order execution that accounts for exchange constraints.
+HAK GEMINI BINANCE TRADER is an automated BTC/USDT futures trading system developed by incorporating Investing AI PO “Crane Sun”’s three years of LLM-based cryptocurrency trading expertise, including fixed position sizing, Gemini-based trend analysis, price-triggered re-evaluation, and order execution that accounts for exchange constraints.
 
 > Risk Notice: This repository is provided for research and educational purposes only. It is not financial advice. Use at your own risk, and test in a paper or demo environment before deploying with real funds.
 >
@@ -13,19 +13,19 @@ HAK GEMINI BINANCE TRADER is an automated BTC/USDT futures trading system develo
 
 ## Research Thesis | 연구 가설과 자동화 우위
 
-이 시스템은 "LLM에게 모든 것을 맡기지 않는다"는 연구 결론 위에 설계되었습니다. 여러 실험 끝에 가장 좋은 결과를 낸 방식은 LLM에게 포지션 크기, 리스크 관리, 주문 실행까지 맡기는 것이 아니라 오직 방향성 판단이라는 하나의 고부가가치 과제만 맡기는 구조였습니다. 그래서 Gemini 프롬프트는 평범한 노이즈 캔들에 흔들리지 않고, 최근 100개의 1시간봉 전체 구조 안에서 정말 중요한 캔들과 시장 구조만 보고 `LONG` 또는 `SHORT`만 반환하도록 설계되었습니다.
+이 시스템은 "LLM에게 모든 것을 맡기지 않는다"는 연구 결론 위에 설계되었습니다. 여러 실험 끝에 가장 좋은 결과를 낸 방식은 LLM에게 포지션 크기, 리스크 관리, 주문 실행까지 맡기는 것이 아니라 오직 방향성 판단이라는 하나의 고부가가치 과제만 맡기는 구조였습니다. 그래서 Gemini 프롬프트는 평범한 노이즈 캔들에 흔들리지 않고, 최근 마감된 100개의 15분봉 구조 안에서 정말 중요한 캔들과 시장 구조만 보고 `LONG` 또는 `SHORT`만 반환하도록 설계되었습니다.
 
-This system is built on a clear research conclusion: do not ask an LLM to do everything. After repeated experiments, the best results came from giving the model one high-value cognitive job only, directional judgment. That is why the Gemini prompt is intentionally strong and narrow: it is designed to ignore ordinary candle noise, focus on the dominant structure inside the latest 100 one-hour candles, and return only a `LONG` or `SHORT` decision.
+This system is built on a clear research conclusion: do not ask an LLM to do everything. After repeated experiments, the best results came from giving the model one high-value cognitive job only, directional judgment. That is why the Gemini prompt is intentionally strong and narrow: it is designed to ignore ordinary candle noise, focus on the dominant structure inside the latest 100 closed 15-minute candles, and return only a `LONG` or `SHORT` decision.
 
-포지션 사이징은 반대로 최대한 기계적이어야 했습니다. 크랜선이 직접 수행한 연구와 백테스트에서, 현재 최대 레버리지 10배 조건에서는 현재 변동성을 과거 변동성 분포와 비교해 익스포저를 정하는 방식이 가장 좋은 성과를 가져왔고, 이 저장소는 그 결론을 자동매매 로직으로 그대로 옮겼습니다. 즉 Gemini는 방향만 판단하고, 시스템은 현재 24시간 변동성을 과거 일봉 변동성 분포에 대입해 목표 증거금 비율과 실효 레버리지를 계산한 뒤 Binance Futures 제약에 맞는 수량 계산, 포지션 리밸런싱, 손절 동기화까지 자동으로 수행합니다.
+포지션 사이징은 반대로 최대한 기계적이어야 했습니다. 현재 런타임은 `initial_position_size_ratio` 하나만 사용해 목표 증거금 비율을 고정하고, Gemini는 방향만 판단하며, 시스템은 Binance Futures 제약에 맞는 수량 계산, 포지션 리밸런싱, 손절 동기화까지 자동으로 수행합니다.
 
-Position sizing, by contrast, proved most effective when handled mechanically. In the current runtime, every fresh entry begins from a fixed `0.4` margin usage ratio. When `enable_auto_position` is `true`, the runtime records that episode's initial entry price in state, keeps the volatility-resize lock threshold at the larger of `profit_activation_pct` and the biggest single-candle midpoint range found in the latest rolling 24 one-hour candles while the lock is still active, and then allows additional scaling up to the configured maximum after unlock. When `enable_auto_position` is `false`, profit unlock and volatility-based resizing are disabled and the runtime keeps targeting the fixed `initial_position_size_ratio` instead.
+Position sizing, by contrast, is intentionally mechanical. The current runtime uses `initial_position_size_ratio` as the single fixed margin usage ratio for fresh entries, reversals, and same-direction rebalancing while Gemini remains responsible only for directional judgment.
 
 - Research-backed role split: the model is used for directional conviction, while sizing and execution remain deterministic and auditable.
 - 연구 기반 역할 분리: 모델은 방향성 확신 판단에만 쓰이고, 사이징과 실행은 결정론적이고 추적 가능한 로직으로 고정됩니다.
 
-- Backtest-driven sizing thesis: under the current 10x leverage framework, volatility-relative sizing outperformed static or intuition-led exposure rules.
-- 백테스트로 검증된 사이징 가설: 현재 10배 레버리지 기준에서는 고정 비중이나 직관적 익스포저보다 변동성 상대 비교 기반 사이징이 더 우수했습니다.
+- Fixed exposure discipline: under the current runtime, exposure is deliberately anchored to `initial_position_size_ratio` so that direction and execution remain easier to audit.
+- 고정 익스포저 규율: 현재 런타임에서는 익스포저를 `initial_position_size_ratio` 에 고정해 방향 판단과 주문 실행을 더 쉽게 추적할 수 있습니다.
 
 - Research translated into automation: the thesis is enforced live through stateful price triggers, exchange-aware order filters, and synchronized risk protection.
 - 연구의 실전 자동화: 이 가설은 상태 기반 가격 트리거, 거래소 제약 반영 주문, 동기화된 리스크 보호 로직으로 실제 운용에 녹아 있습니다.
@@ -35,10 +35,10 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 | Item | Description |
 | --- | --- |
 | Market Scope | BTCUSDT only, intentionally narrowed for operational clarity and safer execution scope. |
-| Decision Engine | Gemini 3.1 Pro Preview returns a structured `LONG` or `SHORT` decision from the latest 100 one-hour candles. |
-| Scheduler | A persistent scheduler manages cycle cadence, state, hourly reporting, and graceful shutdown. |
+| Decision Engine | Gemini 3.1 Pro Preview returns a structured `LONG` or `SHORT` decision from the latest 100 closed 15-minute candles. |
+| Scheduler | A persistent scheduler manages cycle cadence, price-triggered AI re-evaluation, state, and graceful shutdown. |
 | Risk Controls | Fixed leverage, exchange-aware quantity adjustment, min-notional checks, and account-risk-based stop-loss synchronization. |
-| Position Sizing | Fresh entries start at `0.4`. With `enable_auto_position: true`, volatility rank sizing can expand exposure after a profit unlock driven by `max(profit_activation_pct, latest 24h max 1h candle range)`. With `false`, the runtime keeps the fixed initial ratio. |
+| Position Sizing | The runtime uses the fixed `initial_position_size_ratio` for fresh entries, reversals, and rebalancing. |
 | Observability | Logs, JSON artifacts, state persistence, and optional Telegram notifications make each cycle reviewable. |
 
 ## Why This Project Stands Out | 이 프로젝트의 강점
@@ -52,14 +52,14 @@ Position sizing, by contrast, proved most effective when handled mechanically. I
 - Exchange-aware execution: position sizing and order submission respect Binance Futures constraints such as lot size, tick size, leverage, min notional, reduce-only close logic, and transient API retry handling.
 - 거래소 제약을 반영한 실행: 포지션 크기 계산과 주문 실행은 Binance Futures의 수량 단위, 가격 틱, 레버리지, 최소 주문 금액, reduce-only 청산 로직, 일시적 API 장애 재시도까지 고려합니다.
 
-- Configurable sizing mode: with `enable_auto_position: true`, each new position starts at `0.4`, records its initial entry anchor in state, and only then allows volatility-based scaling between `0.4` and `0.98` after the live profit gate unlocks. With `false`, the system keeps the fixed `initial_position_size_ratio`.
-- 설정 가능한 사이징 모드: `enable_auto_position: true` 이면 모든 신규 포지션이 `0.4`에서 시작하고 최초 진입 앵커를 상태에 기록한 뒤, 실시간 수익 unlock 조건을 통과해야만 `0.4`에서 `0.98` 사이의 변동성 기반 증액을 허용합니다. `false` 이면 시스템은 `initial_position_size_ratio` 고정 비중을 유지합니다.
+- Fixed sizing mode: every managed position targets the configured `initial_position_size_ratio`, which keeps exposure behavior deterministic and easier to inspect.
+- 고정 사이징 모드: 모든 관리 포지션은 설정된 `initial_position_size_ratio` 를 목표로 하므로 익스포저 동작이 결정론적이고 점검하기 쉬워집니다.
 
 - Auditability by design: every AI-triggered cycle can leave behind structured artifacts such as prompt input, AI output, and final cycle output, making the system explainable to reviewers and maintainers.
 - 설계 차원의 추적 가능성: AI가 개입한 각 사이클은 프롬프트 입력, AI 출력, 최종 실행 결과를 JSON으로 남길 수 있어, 리뷰어와 유지보수자가 흐름을 추적하고 설명하기 쉽습니다.
 
-- Operator visibility: the runtime supports detailed logging and optional Telegram notifications for cycle start, AI direction, cycle completion, hourly reporting, and unexpected failures.
-- 운영자 가시성: 상세 로그와 선택적 Telegram 알림을 통해 사이클 시작, AI 판단, 실행 결과, 시간 단위 상태 보고, 예외 상황을 빠르게 확인할 수 있습니다.
+- Operator visibility: the runtime supports detailed logging and optional Telegram notifications for cycle start, AI direction, cycle completion, and unexpected failures.
+- 운영자 가시성: 상세 로그와 선택적 Telegram 알림을 통해 사이클 시작, AI 판단, 실행 결과, 예외 상황을 빠르게 확인할 수 있습니다.
 
 ## System Architecture | 시스템 아키텍처
 
@@ -71,9 +71,9 @@ flowchart TD
     D --> E{AI trigger reached?}
     E -- No --> F[Keep position or wait for next trigger window]
     E -- Yes --> G[Create cycle artifact directory]
-    G --> H[Fetch 100 recent 1h candles for AI and sizing samples]
+    G --> H[Fetch 100 recent closed 15m candles for AI]
     H --> I[Gemini structured LONG or SHORT decision]
-    I --> J[Compute volatility-aware target exposure]
+    I --> J[Compute fixed target exposure]
     J --> K[Open, reverse, scale in, or scale out position]
     K --> L[Sync stop-loss and refresh state]
     L --> M[Persist logs, JSON artifacts, and Telegram notifications]
@@ -97,14 +97,14 @@ flowchart TD
 5. If the configured price trigger is not reached, the system updates state and exits the cycle without unnecessary AI cost.
    설정된 가격 트리거에 도달하지 못하면 상태만 갱신하고 AI 비용을 발생시키지 않은 채 사이클을 종료합니다.
 
-6. If the trigger is reached, the runtime creates a cycle directory, gathers the latest 100 one-hour candles for Gemini, and separately refreshes the sizing samples needed for volatility ranking.
-   트리거가 충족되면 사이클 디렉터리를 만들고 Gemini용 최근 100개 1시간봉을 수집한 뒤, 변동성 랭크 계산에 필요한 사이징 샘플을 별도로 갱신합니다.
+6. If the trigger is reached, the runtime creates a cycle directory and gathers the latest 100 closed 15-minute candles for Gemini.
+   트리거가 충족되면 사이클 디렉터리를 만들고 Gemini용 최근 마감 100개 15분봉을 수집합니다.
 
 7. Gemini receives structured market context and returns a strict `LONG` or `SHORT` decision.
    Gemini는 구조화된 시장 컨텍스트를 받아 엄격한 `LONG` 또는 `SHORT` 결정을 반환합니다.
 
-8. The system starts fresh entries at `0.4`. With `enable_auto_position: true`, while the lock is active it keeps the unlock threshold at `max(profit_activation_pct, latest rolling 24h max 1h candle range)` before allowing volatility-based target exposure. With `false`, it simply keeps targeting the fixed `initial_position_size_ratio`.
-   시스템은 신규 진입을 `0.4`에서 시작합니다. `enable_auto_position: true` 이면 lock 이 유지되는 동안 `profit_activation_pct` 와 최근 롤링 24개 1시간봉 중 최대 단일봉 변동폭 중 더 큰 값을 unlock 기준으로 계속 갱신한 뒤에만 변동성 기반 목표 익스포저를 허용합니다. `false` 이면 `initial_position_size_ratio` 고정 비중을 그대로 유지합니다.
+8. The system always targets the fixed `initial_position_size_ratio` when sizing new or existing positions.
+   시스템은 신규 진입과 기존 포지션 리밸런싱 모두에서 고정 `initial_position_size_ratio` 를 목표 비중으로 사용합니다.
 
 9. Based on the AI direction and the current position state, the system may open, reverse, scale in, or scale out.
    AI 방향과 현재 포지션 상태에 따라 신규 진입, 반전, 증액, 축소가 실행될 수 있습니다.
@@ -145,11 +145,11 @@ binance_bol_trader/
 | Path | Role |
 | --- | --- |
 | `main.py` | CLI entrypoint. Runs one cycle with `--once` or starts the long-running scheduler. |
-| `src/strategy/scheduler.py` | Orchestrates scheduling, state persistence, hourly status reporting, and Telegram notifications. |
-| `src/strategy/hakai_strategy.py` | Core trading logic: trigger evaluation, AI cycle execution, volatility sizing, and result persistence. |
+| `src/strategy/scheduler.py` | Orchestrates scheduling, state persistence, and Telegram notifications for the price-triggered runtime. |
+| `src/strategy/hakai_strategy.py` | Core trading logic: trigger evaluation, AI cycle execution, fixed sizing, and result persistence. |
 | `src/ai/gemini_trader.py` | Builds Gemini prompts, validates structured responses, estimates token cost, and saves AI artifacts. |
 | `src/binance/trade_position.py` | Handles Binance Futures execution, leverage, position inspection, stop-loss sync, and exchange filters. |
-| `src/binance/market_data.py` | Fetches and normalizes OHLCV data for the 1-hour AI prompt and volatility sizing logic. |
+| `src/binance/market_data.py` | Fetches and normalizes OHLCV data for the closed 15-minute AI prompt. |
 | `src/binance/binance_rate_limit.py` | Retry logic for transient Binance API failures, rate limits, and execution-unknown cases. |
 | `src/infra/env_loader.py` | Loads secrets and runtime environment variables from the environment or `.env`. |
 | `src/infra/logger.py` | Centralized root logger configuration and structured log formatting. |
@@ -218,17 +218,12 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 | `symbol` | Trading symbol. The current runtime intentionally supports only `BTCUSDT`. | `BTCUSDT` |
 | `cycle_interval_seconds` | Main scheduler cycle interval. | `60` |
 | `trigger_pct_usdt` | Percent move from the last AI trigger price required to request a new AI decision. | `0.75` |
-| `ai_prompt_timeframe` | Timeframe sent to the AI model. The current runtime supports only `1h`. | `1h` |
-| `ai_prompt_candle_count` | Number of recent 1-hour candles sent to the AI model. | `100` |
+| `ai_prompt_timeframe` | Timeframe sent to the AI model. The current runtime supports only `15m`. | `15m` |
+| `ai_prompt_candle_count` | Number of recent closed 15-minute candles sent to the AI model. | `100` |
 | `gemini_thinking_level` | Gemini 3.1 Pro Preview reasoning level. Supported values: `low`, `medium`, `high`. | `high` |
 | `fixed_leverage` | Fixed leverage applied on entry and position sizing logic. | `10` |
 | `stop_loss_pct` | Account-level stop-loss risk ratio, converted into an entry-price stop distance from effective leverage. | `0.04` |
-| `position_sizing_daily_sample_days` | Number of closed daily candles used for volatility rank sampling. The runtime fetches `sample_days + 2` daily candles to exclude the in-progress candle safely. | `25` |
-| `position_sizing_live_window_hours` | Number of recent 1-hour candles used to measure live volatility. | `24` |
-| `initial_position_size_ratio` | Fixed margin usage ratio used for a fresh entry or reversal before any volatility-based add-on sizing is allowed. | `0.4` |
-| `enable_auto_position` | Enables the profit-unlock plus volatility-based add-on sizing flow. When disabled, the runtime keeps targeting `initial_position_size_ratio`. | `true` |
-| `profit_activation_pct` | Minimum favorable move floor for unlocking volatility-based resizing. While locked, the runtime uses the larger of this value and the biggest single-candle midpoint range from the latest 24 one-hour candles. | `0.01` |
-| `position_size_ratio_max` | Upper bound on the margin usage ratio. With the default 25-day sample, rank `25` maps to this value. | `0.98` |
+| `initial_position_size_ratio` | Fixed margin usage ratio used for fresh entries, reversals, and rebalancing. | `0.4` |
 | `gemini_api_version` | Optional runtime config key with a default in code. | `v1beta` by default |
 
 ### How `setting.yaml` affects behavior | `setting.yaml`이 실제 동작에 미치는 영향
@@ -239,17 +234,14 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 - A higher `cycle_interval_seconds` reduces operational frequency and API activity.
 - `cycle_interval_seconds`가 높을수록 운영 빈도와 API 호출 빈도가 줄어듭니다.
 
-- `fixed_leverage`, `initial_position_size_ratio`, `enable_auto_position`, and `position_size_ratio_max` directly shape risk exposure.
-- `fixed_leverage`, `initial_position_size_ratio`, `enable_auto_position`, `position_size_ratio_max`는 실제 위험 노출 수준에 직접 영향을 줍니다.
+- `fixed_leverage` and `initial_position_size_ratio` directly shape risk exposure.
+- `fixed_leverage` 와 `initial_position_size_ratio` 는 실제 위험 노출 수준에 직접 영향을 줍니다.
 
 - `stop_loss_pct` defines the account-level risk budget used to derive the live stop-loss distance from position size and leverage.
 - `stop_loss_pct`는 포지션 비중과 레버리지로부터 실제 손절 거리를 계산할 때 쓰는 계좌 기준 리스크 예산입니다.
 
-- Volatility sizing fields determine how adaptive the system becomes under calm versus fast markets.
-- 변동성 사이징 관련 값들은 조용한 시장과 급변하는 시장에서 시스템이 얼마나 유연하게 대응하는지를 결정합니다.
-
-- With `enable_auto_position: true`, the runtime still ranks current 24-hour volatility against the latest 25 closed daily candles and derives a volatility ratio up to `0.98`, but fresh entries remain fixed at `0.4` until the recorded initial entry reaches the live unlock threshold computed from `max(profit_activation_pct, latest rolling 24h max 1h candle range)`. After unlock, sizing can expand on the next price-triggered AI cycle.
-- `enable_auto_position: false` 이면 현재 24시간 변동성 랭크는 관측과 로그용으로 계속 계산되더라도, 실제 목표 비중은 `initial_position_size_ratio` 로 고정되고 AI 재판단도 가격 트리거에서만 발생합니다.
+- `ai_prompt_timeframe` and `ai_prompt_candle_count` determine how much short-term structure the AI sees on each price-triggered cycle.
+- `ai_prompt_timeframe` 과 `ai_prompt_candle_count` 는 가격 트리거가 발생했을 때 AI가 확인하는 단기 시장 구조의 범위를 결정합니다.
 
 ## How to Run | 실행 방법
 

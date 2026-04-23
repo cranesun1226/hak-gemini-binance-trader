@@ -22,12 +22,13 @@ def _build_candles(count: int, interval_ms: int) -> list[dict[str, float]]:
 
 
 class PromptMarketContextTests(unittest.TestCase):
-    def test_fetch_prompt_market_context_keeps_ai_payload_hourly_only(self):
-        hourly_candles = _build_candles(100, 60 * 60 * 1000)
-        daily_candles = _build_candles(27, 24 * 60 * 60 * 1000)
+    def test_fetch_prompt_market_context_keeps_ai_payload_closed_fifteen_minute_only(self):
+        fifteen_minute_candles = _build_candles(102, 15 * 60 * 1000)
 
         def _fake_fetch_klines(_symbol: str, timeframe: str, limit: int, *, as_of_ms=None):
-            source = hourly_candles if timeframe == "1h" else daily_candles
+            del as_of_ms
+            self.assertEqual(timeframe, "15m")
+            source = fifteen_minute_candles
             return source[-limit:]
 
         with patch("src.strategy.hakai_strategy.fetch_klines", side_effect=_fake_fetch_klines), patch(
@@ -36,19 +37,17 @@ class PromptMarketContextTests(unittest.TestCase):
         ):
             context = hakai_strategy._fetch_prompt_market_context(
                 symbol="BTCUSDT",
-                ai_prompt_timeframe="1h",
+                ai_prompt_timeframe="15m",
                 ai_prompt_candle_count=100,
-                position_sizing_daily_sample_days=25,
-                position_sizing_live_window_hours=24,
-                as_of_ms=daily_candles[-1]["timestamp"] + (2 * 24 * 60 * 60 * 1000),
+                as_of_ms=fifteen_minute_candles[-1]["timestamp"] + (5 * 60 * 1000),
             )
 
-        self.assertEqual(context["ai_prompt_timeframe"], "1h")
+        self.assertEqual(context["ai_prompt_timeframe"], "15m")
         self.assertEqual(context["ai_prompt_candle_count"], 100)
-        self.assertEqual(list(context["timeframes"].keys()), ["1h"])
-        self.assertEqual(len(context["timeframes"]["1h"]), 100)
-        self.assertEqual(len(context["live_window_candles"]), 24)
-        self.assertEqual(len(context["daily_position_sizing_candles"]), 25)
+        self.assertEqual(list(context["timeframes"].keys()), ["15m"])
+        self.assertEqual(len(context["timeframes"]["15m"]), 100)
+        self.assertEqual(context["timeframes"]["15m"][0][0], fifteen_minute_candles[1]["open"])
+        self.assertEqual(context["timeframes"]["15m"][-1][0], fifteen_minute_candles[100]["open"])
 
 
 if __name__ == "__main__":

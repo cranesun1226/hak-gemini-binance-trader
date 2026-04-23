@@ -18,7 +18,7 @@ logger = get_logger("scheduler")
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 STATE_FILE = os.path.join(ROOT_DIR, "scheduler_state.json")
 CONFIG_PATH = os.path.join(ROOT_DIR, "setting.yaml")
-STATE_VERSION = "7.4-hakai-initial-entry-sizing"
+STATE_VERSION = "8.0-hakai-fixed-15m"
 SCHEDULE_SECOND_OFFSET = 10
 HOURLY_REPORT_DELAY_SECONDS = 10
 
@@ -36,7 +36,6 @@ ACTION_LABELS = {
     "init": "Initialized",
     "hold_waiting_round_trigger": "Waiting for next round",
     "hold_waiting_price_trigger": "Waiting for next price level",
-    "hold_volatility_cooldown": "Initial entry paused by 1h volatility cool down",
     "hold_stop_updated": "Position kept, stop updated",
     "opened_new_position": "Opened new position",
     "scaled_in_position": "Scaled in position",
@@ -140,15 +139,8 @@ class TradingScheduler:
             "last_ai_decision": None,
             "next_trigger_down": None,
             "next_trigger_up": None,
-            "initial_entry_price": None,
-            "initial_entry_direction": None,
-            "position_sizing_activation_pct": None,
-            "position_sizing_activation_price": None,
-            "position_sizing_unlocked": False,
-            "position_sizing_activated_at": None,
             "stop_risk_basis": None,
             "last_cycle_result": None,
-            "last_hourly_report_slot": None,
         }
 
     def _load_config(self) -> Dict[str, Any]:
@@ -172,13 +164,14 @@ class TradingScheduler:
                         merged["last_ai_trigger_price"] = None
                         merged["next_trigger_down"] = None
                         merged["next_trigger_up"] = None
-                        merged["initial_entry_price"] = None
-                        merged["initial_entry_direction"] = None
-                        merged["position_sizing_activation_pct"] = None
-                        merged["position_sizing_activation_price"] = None
-                        merged["position_sizing_unlocked"] = False
-                        merged["position_sizing_activated_at"] = None
                     merged.pop("last_ai_trigger_round_price", None)
+                    merged.pop("initial_entry_price", None)
+                    merged.pop("initial_entry_direction", None)
+                    merged.pop("position_sizing_activation_pct", None)
+                    merged.pop("position_sizing_activation_price", None)
+                    merged.pop("position_sizing_unlocked", None)
+                    merged.pop("position_sizing_activated_at", None)
+                    merged.pop("last_hourly_report_slot", None)
                     merged.pop("last_hourly_resize_slot", None)
                     merged["version"] = STATE_VERSION
                     return merged
@@ -190,6 +183,13 @@ class TradingScheduler:
 
     def save_state(self) -> None:
         try:
+            self.state.pop("initial_entry_price", None)
+            self.state.pop("initial_entry_direction", None)
+            self.state.pop("position_sizing_activation_pct", None)
+            self.state.pop("position_sizing_activation_price", None)
+            self.state.pop("position_sizing_unlocked", None)
+            self.state.pop("position_sizing_activated_at", None)
+            self.state.pop("last_hourly_report_slot", None)
             self.state.pop("last_hourly_resize_slot", None)
             with open(self.state_file_path, "w", encoding="utf-8") as file_obj:
                 json.dump(self.state, file_obj, indent=2, ensure_ascii=False)
@@ -202,6 +202,13 @@ class TradingScheduler:
         for key, value in update.items():
             self.state[key] = value
         self.state.pop("last_ai_trigger_round_price", None)
+        self.state.pop("initial_entry_price", None)
+        self.state.pop("initial_entry_direction", None)
+        self.state.pop("position_sizing_activation_pct", None)
+        self.state.pop("position_sizing_activation_price", None)
+        self.state.pop("position_sizing_unlocked", None)
+        self.state.pop("position_sizing_activated_at", None)
+        self.state.pop("last_hourly_report_slot", None)
         self.state.pop("last_hourly_resize_slot", None)
 
     def _summarize_cycle_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -258,6 +265,15 @@ class TradingScheduler:
     def _format_percentile_sizing_summary(self, snapshot: Any) -> str:
         payload = snapshot if isinstance(snapshot, dict) else {}
         try:
+            target_margin_ratio = float(
+                payload.get("applied_target_margin_ratio", payload.get("target_margin_ratio"))
+            )
+        except (TypeError, ValueError):
+            target_margin_ratio = None
+        if str(payload.get("position_sizing_mode") or "").strip().lower() == "fixed_ratio" and target_margin_ratio is not None:
+            return f"Fixed {target_margin_ratio * 100.0:.2f}%"
+
+        try:
             live_range_log = float(payload.get("live_range_log"))
             rank_estimate = float(payload.get("percentile_rank_estimate"))
             sample_size = int(payload.get("sample_size"))
@@ -283,11 +299,8 @@ class TradingScheduler:
         is_unlocked = bool(payload.get("position_sizing_unlocked"))
         keep_current_position_size = bool(payload.get("keep_current_position_size"))
         initial_position_size_ratio = payload.get("initial_position_size_ratio")
-        enable_auto_position = bool(payload.get("enable_auto_position", True))
         if keep_current_position_size:
             status_text = "Bootstrap hold"
-        elif not enable_auto_position:
-            status_text = f"Fixed {target_margin_ratio * 100.0:.2f}% (auto off)"
         elif not is_unlocked and activation_price is not None:
             locked_until_text = f"Locked until {self._format_usdt(activation_price, digits=0)}"
             try:
@@ -593,8 +606,12 @@ class TradingScheduler:
 
     # Telegram notification rendering.
     def _build_ai_cycle_before_message(self, payload: Dict[str, Any]) -> str:
-        volatility_snapshot = (
-            payload.get("volatility_snapshot") if isinstance(payload.get("volatility_snapshot"), dict) else {}
+        position_sizing = (
+            payload.get("position_sizing")
+            if isinstance(payload.get("position_sizing"), dict)
+            else payload.get("volatility_snapshot")
+            if isinstance(payload.get("volatility_snapshot"), dict)
+            else {}
         )
         return self._build_message(
             title=self._format_html_title("HAK GEMINI BINANCE TRADER | AI Cycle Start", emoji="🚦"),
@@ -630,11 +647,11 @@ class TradingScheduler:
                         self._format_html_line("Now", self._format_position_summary(payload.get("position"))),
                         self._format_html_line(
                             "Target",
-                            self._format_pct(self._get_display_target_margin_ratio(volatility_snapshot)),
+                            self._format_pct(self._get_display_target_margin_ratio(position_sizing)),
                         ),
                         self._format_html_line(
                             "Sizing",
-                            self._format_percentile_sizing_summary(volatility_snapshot),
+                            self._format_percentile_sizing_summary(position_sizing),
                         ),
                     ],
                     True,
@@ -674,8 +691,12 @@ class TradingScheduler:
         )
 
     def _build_cycle_completed_message(self, payload: Dict[str, Any]) -> str:
-        volatility_snapshot = (
-            payload.get("volatility_snapshot") if isinstance(payload.get("volatility_snapshot"), dict) else {}
+        position_sizing = (
+            payload.get("position_sizing")
+            if isinstance(payload.get("position_sizing"), dict)
+            else payload.get("volatility_snapshot")
+            if isinstance(payload.get("volatility_snapshot"), dict)
+            else {}
         )
         is_ai_cycle = bool(payload.get("ai_triggered"))
         title = (
@@ -710,7 +731,7 @@ class TradingScheduler:
             ),
         ]
 
-        has_account_data = bool(volatility_snapshot) or any(
+        has_account_data = bool(position_sizing) or any(
             payload.get(key) is not None for key in ("account_equity", "target_notional_usdt")
         )
         if has_account_data:
@@ -721,16 +742,16 @@ class TradingScheduler:
                         self._format_html_line("Asset", self._format_usdt(payload.get("account_equity"))),
                         self._format_html_line(
                             "Position Pct",
-                            self._format_pct(self._get_display_target_margin_ratio(volatility_snapshot)),
+                            self._format_pct(self._get_display_target_margin_ratio(position_sizing)),
                         ),
                         self._format_html_line(
                             "Actual Leverage",
-                            f"{self._format_float(self._get_display_target_effective_leverage(volatility_snapshot))}x",
+                            f"{self._format_float(self._get_display_target_effective_leverage(position_sizing))}x",
                         ),
                         self._format_html_line("Target Amount", self._format_usdt(payload.get("target_notional_usdt"))),
                         self._format_html_line(
                             "Sizing",
-                            self._format_percentile_sizing_summary(volatility_snapshot),
+                            self._format_percentile_sizing_summary(position_sizing),
                         ),
                     ],
                     True,
