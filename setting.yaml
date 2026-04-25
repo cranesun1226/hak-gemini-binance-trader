@@ -14,9 +14,9 @@ symbol: BTCUSDT
 # Sets how many seconds to wait between each price-monitoring cycle.
 cycle_interval_seconds: 60
 
-# 마지막 AI 트리거 기준가에서 몇 % 움직이면 AI 판단을 다시 요청할지 설정하며 0.75는 0.75%를 뜻합니다.
-# Sets the percent move from the last AI trigger price needed to request a new AI decision; 0.75 means 0.75%.
-trigger_pct_usdt: 0.75
+# 마지막 AI 트리거 기준가에서 몇 % 움직이면 AI 판단을 다시 요청할지 설정하며 0.5는 0.5%를 뜻합니다.
+# Sets the percent move from the last AI trigger price needed to request a new AI decision; 0.5 means 0.5%.
+trigger_pct_usdt: 0.5
 
 # ================================================================================
 # AI 입력 및 추론 설정

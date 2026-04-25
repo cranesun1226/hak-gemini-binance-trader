@@ -10,7 +10,7 @@ def _config():
     return {
         "symbol": "BTCUSDT",
         "fixed_leverage": 10,
-        "trigger_pct_usdt": 0.75,
+        "trigger_pct_usdt": 0.5,
         "initial_position_size_ratio": 0.4,
         "stop_loss_pct": 0.04,
         "ai_prompt_timeframe": "15m",
@@ -34,9 +34,9 @@ def _long_position():
         "positionAmt": "0.1",
         "side": "Buy",
         "entryPrice": "100000",
-        "markPrice": "100750",
+        "markPrice": "100500",
         "leverage": "10",
-        "positionValue": "10075",
+        "positionValue": "10050",
     }
 
 
@@ -77,13 +77,13 @@ class HakaiDecisionFlowTests(unittest.TestCase):
         mocked_place.assert_not_called()
 
     def test_keep_existing_position_skips_close_and_entry(self):
-        state = {"last_ai_trigger_price": 100000.0, "trigger_pct_usdt": 0.75}
+        state = {"last_ai_trigger_price": 100000.0, "trigger_pct_usdt": 0.5}
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "src.strategy.hakai_strategy._load_strategy_config", return_value=_config()
         ), patch("src.strategy.hakai_strategy.get_binance_credentials", return_value=("key", "secret")), patch(
             "src.strategy.hakai_strategy.get_positions", return_value=[_long_position()]
         ), patch(
-            "src.strategy.hakai_strategy.get_reference_price", return_value={"price": 100750.0}
+            "src.strategy.hakai_strategy.get_reference_price", return_value={"price": 100500.0}
         ), patch(
             "src.strategy.hakai_strategy.get_account_equity", return_value=1000.0
         ), patch(
@@ -119,13 +119,13 @@ class HakaiDecisionFlowTests(unittest.TestCase):
         mocked_set_leverage.assert_not_called()
 
     def test_flip_then_flat_closes_position_without_reentry(self):
-        state = {"last_ai_trigger_price": 100000.0, "trigger_pct_usdt": 0.75}
+        state = {"last_ai_trigger_price": 100000.0, "trigger_pct_usdt": 0.5}
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "src.strategy.hakai_strategy._load_strategy_config", return_value=_config()
         ), patch("src.strategy.hakai_strategy.get_binance_credentials", return_value=("key", "secret")), patch(
             "src.strategy.hakai_strategy.get_positions", return_value=[_long_position()]
         ), patch(
-            "src.strategy.hakai_strategy.get_reference_price", return_value={"price": 100750.0}
+            "src.strategy.hakai_strategy.get_reference_price", return_value={"price": 100500.0}
         ), patch(
             "src.strategy.hakai_strategy.get_account_equity", return_value=1000.0
         ), patch(

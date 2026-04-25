@@ -25,7 +25,7 @@ class FixedPositionSizingTests(unittest.TestCase):
                 "position_sizing_unlocked": True,
                 "position_sizing_activated_at": "2026-04-21T00:00:00+00:00",
             },
-            trigger_pct_usdt=0.75,
+            trigger_pct_usdt=0.5,
             ai_triggered=False,
             trigger_price=None,
             ai_decision=None,
@@ -43,21 +43,21 @@ class FixedPositionSizingTests(unittest.TestCase):
     def test_state_update_accepts_flat_and_position_management_decisions(self):
         flat_update = hakai_strategy._build_state_update(
             previous_state={},
-            trigger_pct_usdt=0.75,
+            trigger_pct_usdt=0.5,
             ai_triggered=True,
             trigger_price=100000.0,
             ai_decision="FLAT",
-            next_trigger_down=99250.0,
-            next_trigger_up=100750.0,
+            next_trigger_down=99500.0,
+            next_trigger_up=100500.0,
         )
         keep_update = hakai_strategy._build_state_update(
             previous_state=flat_update,
-            trigger_pct_usdt=0.75,
+            trigger_pct_usdt=0.5,
             ai_triggered=True,
-            trigger_price=100750.0,
+            trigger_price=100500.0,
             ai_decision="KEEP",
-            next_trigger_down=99994.38,
-            next_trigger_up=101505.62,
+            next_trigger_down=99997.5,
+            next_trigger_up=101002.5,
         )
 
         self.assertEqual(flat_update["last_ai_decision"], "FLAT")

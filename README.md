@@ -217,7 +217,7 @@ The strategy runtime reads `setting.yaml` on every cycle, so these values define
 | --- | --- | --- |
 | `symbol` | Trading symbol. The current runtime intentionally supports only `BTCUSDT`. | `BTCUSDT` |
 | `cycle_interval_seconds` | Main scheduler cycle interval. | `60` |
-| `trigger_pct_usdt` | Percent move from the last AI trigger price required to request a new AI decision. | `0.75` |
+| `trigger_pct_usdt` | Percent move from the last AI trigger price required to request a new AI decision. | `0.5` |
 | `ai_prompt_timeframe` | Timeframe sent to the AI model. The current runtime supports only `15m`. | `15m` |
 | `ai_prompt_candle_count` | Number of recent closed 15-minute candles sent to the AI model. | `100` |
 | `gemini_thinking_level` | Gemini 3.1 Pro Preview reasoning level. Supported values: `low`, `medium`, `high`. | `high` |
