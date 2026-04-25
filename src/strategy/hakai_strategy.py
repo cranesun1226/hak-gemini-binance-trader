@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 from statistics import median
 from typing import Any, Callable, Dict, Optional, Sequence
 
-from src.ai.gemini_trader import evaluate_hakai_direction
+from src.ai.gemini_trader import (
+    evaluate_hakai_entry_direction,
+    evaluate_hakai_position_management,
+)
 from src.binance.common import interval_to_minutes
 from src.binance.market_data import fetch_klines, parse_klines
 from src.binance.trade_position import (
@@ -66,7 +69,9 @@ _INITIAL_ENTRY_VOLATILITY_COOLDOWN_THRESHOLD_PCT = 0.01
 _INITIAL_ENTRY_VOLATILITY_COOLDOWN_CANDLE_COUNT = 2
 NotificationCallback = Optional[Callable[[str, Dict[str, Any]], None]]
 _DIRECTIONAL_AI_DECISIONS = {"LONG", "SHORT"}
-_VALID_AI_DECISIONS = set(_DIRECTIONAL_AI_DECISIONS)
+_ENTRY_AI_DECISIONS = set(_DIRECTIONAL_AI_DECISIONS) | {"FLAT"}
+_POSITION_MANAGEMENT_AI_DECISIONS = {"KEEP", "FLIP"}
+_VALID_AI_DECISIONS = _ENTRY_AI_DECISIONS | _POSITION_MANAGEMENT_AI_DECISIONS
 _STATE_UNSET = object()
 
 # Configuration and normalization helpers.
@@ -1876,7 +1881,7 @@ def _position_sync_matches_expected(
     snapshot_metrics = calculate_position_metrics(snapshot)
     snapshot_size = abs(_safe_float(snapshot_metrics.get("size"), 0.0) or 0.0)
     snapshot_direction = str(snapshot_metrics.get("direction") or "").strip().lower()
-    if normalized_action == "opened_new_position":
+    if normalized_action in {"opened_new_position", "flipped_and_opened_position"}:
         return snapshot_size > 0.0 and snapshot_direction in ("long", "short")
 
     if previous_position is None:
@@ -2276,12 +2281,68 @@ def _rebalance_existing_position(
     }
 
 
+def _close_existing_position_for_flip(
+    *,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    current_position: Dict[str, Any],
+) -> Dict[str, Any]:
+    current_metrics = calculate_position_metrics(current_position)
+    current_direction = str(current_metrics.get("direction") or "").strip().lower()
+    current_side = str(current_metrics.get("side") or "").strip()
+    current_size = abs(_safe_float(current_metrics.get("size"), 0.0) or 0.0)
+
+    if current_direction not in ("long", "short") or not current_side or current_size <= 0.0:
+        return {
+            "success": False,
+            "action": "invalid_existing_position",
+        }
+
+    close_ok = close_position(
+        api_key,
+        api_secret,
+        symbol,
+        current_side,
+        str(current_size),
+    )
+    if not close_ok:
+        return {
+            "success": False,
+            "action": "close_position_failed",
+        }
+
+    close_propagated = wait_for_close_propagation(
+        api_key,
+        api_secret,
+        [symbol],
+        context="flip_position",
+    )
+    cancel_all_orders(api_key, api_secret, symbol)
+    if not close_propagated:
+        return {
+            "success": False,
+            "action": "close_position_failed",
+            "closed_direction": current_direction,
+            "closed_qty": current_size,
+            "close_propagated": False,
+        }
+    return {
+        "success": True,
+        "action": "flipped_position_closed",
+        "closed_direction": current_direction,
+        "closed_qty": current_size,
+        "close_propagated": close_propagated,
+    }
+
+
 def _determine_ai_trigger(
     *,
     has_position: bool,
     current_price: float,
     last_ai_trigger_price: Optional[float],
     trigger_pct_usdt: float,
+    last_ai_decision: Optional[str] = None,
     next_trigger_down: Optional[float] = None,
     next_trigger_up: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -2306,6 +2367,45 @@ def _determine_ai_trigger(
             active_trigger_up = anchor_levels["next_trigger_up"]
             boundary_source = "last_price_anchor"
             has_valid_trigger_window = True
+
+    normalized_last_ai_decision = _normalize_ai_decision(last_ai_decision)
+
+    if not has_position and normalized_last_ai_decision == "FLAT" and has_valid_trigger_window:
+        if current_price >= float(active_trigger_up):
+            next_levels = _build_trigger_levels(current_price, trigger_pct_usdt)
+            return {
+                "should_trigger": True,
+                "reason": "price_distance_reached",
+                "current_trigger_price": current_trigger_price,
+                "trigger_price": next_levels["trigger_price"],
+                "next_trigger_down": next_levels["next_trigger_down"],
+                "next_trigger_up": next_levels["next_trigger_up"],
+                "boundary_source": boundary_source,
+                "trigger_direction": "up",
+            }
+
+        if current_price <= float(active_trigger_down):
+            next_levels = _build_trigger_levels(current_price, trigger_pct_usdt)
+            return {
+                "should_trigger": True,
+                "reason": "price_distance_reached",
+                "current_trigger_price": current_trigger_price,
+                "trigger_price": next_levels["trigger_price"],
+                "next_trigger_down": next_levels["next_trigger_down"],
+                "next_trigger_up": next_levels["next_trigger_up"],
+                "boundary_source": boundary_source,
+                "trigger_direction": "down",
+            }
+
+        return {
+            "should_trigger": False,
+            "reason": "waiting_for_next_price_trigger",
+            "current_trigger_price": current_trigger_price,
+            "trigger_price": None,
+            "next_trigger_down": active_trigger_down,
+            "next_trigger_up": active_trigger_up,
+            "boundary_source": boundary_source,
+        }
 
     if not has_position:
         next_levels = _build_trigger_levels(current_price, trigger_pct_usdt)
@@ -2565,6 +2665,7 @@ def run_hakai_cycle(
         current_price=reference_price,
         last_ai_trigger_price=_normalize_trigger_price(previous_state.get("last_ai_trigger_price")),
         trigger_pct_usdt=trigger_pct_usdt,
+        last_ai_decision=previous_state.get("last_ai_decision"),
         next_trigger_down=_normalize_trigger_price(previous_state.get("next_trigger_down")),
         next_trigger_up=_normalize_trigger_price(previous_state.get("next_trigger_up")),
     )
@@ -2668,6 +2769,7 @@ def run_hakai_cycle(
         ),
     )
 
+    decision_mode = "position" if current_position is not None else "entry"
     ai_analysis: Dict[str, Any] = {}
     _emit_notification(
         notification_callback,
@@ -2684,95 +2786,408 @@ def run_hakai_cycle(
             "position": result.get("position_before"),
             "previous_ai_decision": previous_state.get("last_ai_decision"),
             "position_sizing": dict(fixed_position_sizing),
+            "decision_mode": decision_mode,
         },
     )
 
-    ai_decision = evaluate_hakai_direction(
-        cycle_dir=cycle_dir,
-        symbol=symbol,
-        reference_price=reference_price,
-        timeframe_ohlcv=market_context["timeframes"],
-        api_version=str(config["gemini_api_version"]),
-        thinking_level=str(config["gemini_thinking_level"]),
-        analysis_sink=ai_analysis,
-        current_position_snapshot=prompt_position_snapshot,
-    )
-    if ai_decision is None:
-        result["action"] = "ai_decision_failed"
-        if ai_analysis:
-            result["ai_analysis"] = dict(ai_analysis)
-        result["state_update"] = _build_state_update(
-            previous_state=previous_state,
-            trigger_pct_usdt=trigger_pct_usdt,
-            ai_triggered=False,
-            trigger_price=None,
-            ai_decision=None,
-            next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
-            next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
-            stop_risk_basis=state_stop_risk_basis,
+    entry_decision_value: Optional[str] = None
+    execution_previous_position = current_position
+    flipped_before_entry = False
+
+    if current_position is None:
+        ai_decision = evaluate_hakai_entry_direction(
+            cycle_dir=cycle_dir,
+            symbol=symbol,
+            reference_price=reference_price,
+            timeframe_ohlcv=market_context["timeframes"],
+            api_version=str(config["gemini_api_version"]),
+            thinking_level=str(config["gemini_thinking_level"]),
+            analysis_sink=ai_analysis,
+            current_position_snapshot=None,
+        )
+        if ai_decision is None:
+            result["action"] = "ai_decision_failed"
+            if ai_analysis:
+                result["ai_analysis"] = dict(ai_analysis)
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=False,
+                trigger_price=None,
+                ai_decision=None,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                stop_risk_basis=state_stop_risk_basis,
+            )
+            _emit_notification(
+                notification_callback,
+                "ai_cycle_after",
+                {
+                    "timestamp": _current_time_utc().isoformat(),
+                    "success": False,
+                    "symbol": symbol,
+                    "cycle_dir": cycle_dir,
+                    "current_price": reference_price,
+                    "trigger_reason": trigger_info.get("reason"),
+                    "decision": None,
+                    "analysis": dict(ai_analysis),
+                    "position_sizing": dict(fixed_position_sizing),
+                    "decision_mode": "entry",
+                },
+            )
+            _persist_cycle_output(result)
+            logger.error(
+                "AI entry decision failed | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "cycle_dir": cycle_dir,
+                        "current_price": reference_price,
+                        "trigger_reason": trigger_info.get("reason"),
+                        "ai_analysis": ai_analysis,
+                    }
+                ),
+            )
+            return result
+
+        result["ai_triggered"] = True
+        result["ai_decision"] = ai_decision.decision
+        result["ai_analysis"] = dict(ai_analysis)
+        logger.info(
+            "AI entry decision received | %s",
+            format_log_details(
+                {
+                    "symbol": symbol,
+                    "cycle_dir": cycle_dir,
+                    "decision": ai_decision.decision,
+                    "thought_signatures": len(ai_analysis.get("thought_signatures") or []),
+                    "thought_summary": ai_analysis.get("thought_summary"),
+                    "usage_metadata": ai_analysis.get("usage_metadata"),
+                }
+            ),
         )
         _emit_notification(
             notification_callback,
             "ai_cycle_after",
             {
                 "timestamp": _current_time_utc().isoformat(),
-                "success": False,
+                "success": True,
                 "symbol": symbol,
                 "cycle_dir": cycle_dir,
                 "current_price": reference_price,
                 "trigger_reason": trigger_info.get("reason"),
-                "decision": None,
+                "decision": ai_decision.decision,
                 "analysis": dict(ai_analysis),
                 "position_sizing": dict(fixed_position_sizing),
+                "position": result.get("position_before"),
+                "decision_mode": "entry",
             },
         )
-        _persist_cycle_output(result)
-        logger.error(
-            "AI decision failed | %s",
-            format_log_details(
+
+        if ai_decision.decision == "FLAT":
+            result["success"] = True
+            result["action"] = "flat_no_entry"
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=True,
+                trigger_price=trigger_price,
+                ai_decision=ai_decision.decision,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                stop_risk_basis=None,
+            )
+            _persist_cycle_output(result)
+            logger.info(
+                "AI chose FLAT; no entry order submitted | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "cycle_dir": cycle_dir,
+                        "current_price": reference_price,
+                        "next_trigger_down": result.get("next_trigger_down"),
+                        "next_trigger_up": result.get("next_trigger_up"),
+                    }
+                ),
+            )
+            return result
+
+        entry_decision_value = ai_decision.decision
+
+    else:
+        position_decision = evaluate_hakai_position_management(
+            cycle_dir=cycle_dir,
+            symbol=symbol,
+            reference_price=reference_price,
+            timeframe_ohlcv=market_context["timeframes"],
+            api_version=str(config["gemini_api_version"]),
+            thinking_level=str(config["gemini_thinking_level"]),
+            analysis_sink=ai_analysis,
+            current_position_snapshot=prompt_position_snapshot or result.get("position_before"),
+        )
+        if position_decision is None:
+            result["action"] = "ai_decision_failed"
+            if ai_analysis:
+                result["ai_analysis"] = dict(ai_analysis)
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=False,
+                trigger_price=None,
+                ai_decision=None,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                stop_risk_basis=state_stop_risk_basis,
+            )
+            _emit_notification(
+                notification_callback,
+                "ai_cycle_after",
                 {
+                    "timestamp": _current_time_utc().isoformat(),
+                    "success": False,
                     "symbol": symbol,
                     "cycle_dir": cycle_dir,
                     "current_price": reference_price,
                     "trigger_reason": trigger_info.get("reason"),
-                    "ai_analysis": ai_analysis,
+                    "decision": None,
+                    "analysis": dict(ai_analysis),
+                    "position_sizing": dict(fixed_position_sizing),
+                    "decision_mode": "position",
+                },
+            )
+            _persist_cycle_output(result)
+            logger.error(
+                "AI position-management decision failed | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "cycle_dir": cycle_dir,
+                        "current_price": reference_price,
+                        "trigger_reason": trigger_info.get("reason"),
+                        "ai_analysis": ai_analysis,
+                    }
+                ),
+            )
+            return result
+
+        result["ai_triggered"] = True
+        result["ai_decision"] = position_decision.decision
+        result["position_ai_decision"] = position_decision.decision
+        result["ai_analysis"] = dict(ai_analysis)
+        logger.info(
+            "AI position-management decision received | %s",
+            format_log_details(
+                {
+                    "symbol": symbol,
+                    "cycle_dir": cycle_dir,
+                    "decision": position_decision.decision,
+                    "thought_signatures": len(ai_analysis.get("thought_signatures") or []),
+                    "thought_summary": ai_analysis.get("thought_summary"),
+                    "usage_metadata": ai_analysis.get("usage_metadata"),
                 }
             ),
         )
-        return result
-
-    result["ai_triggered"] = True
-    result["ai_decision"] = ai_decision.decision
-    result["ai_analysis"] = dict(ai_analysis)
-    logger.info(
-        "AI decision received | %s",
-        format_log_details(
+        _emit_notification(
+            notification_callback,
+            "ai_cycle_after",
             {
+                "timestamp": _current_time_utc().isoformat(),
+                "success": True,
                 "symbol": symbol,
                 "cycle_dir": cycle_dir,
-                "decision": ai_decision.decision,
-                "thought_signatures": len(ai_analysis.get("thought_signatures") or []),
-                "thought_summary": ai_analysis.get("thought_summary"),
-                "usage_metadata": ai_analysis.get("usage_metadata"),
-            }
-        ),
-    )
-    _emit_notification(
-        notification_callback,
-        "ai_cycle_after",
-        {
-            "timestamp": _current_time_utc().isoformat(),
-            "success": True,
-            "symbol": symbol,
-            "cycle_dir": cycle_dir,
-            "current_price": reference_price,
-            "trigger_reason": trigger_info.get("reason"),
-            "decision": ai_decision.decision,
-            "analysis": dict(ai_analysis),
-            "position_sizing": dict(fixed_position_sizing),
-            "position": result.get("position_before"),
-        },
-    )
+                "current_price": reference_price,
+                "trigger_reason": trigger_info.get("reason"),
+                "decision": position_decision.decision,
+                "analysis": dict(ai_analysis),
+                "position_sizing": dict(fixed_position_sizing),
+                "position": result.get("position_before"),
+                "decision_mode": "position",
+            },
+        )
+
+        if position_decision.decision == "KEEP":
+            result["success"] = True
+            result["action"] = "kept_position_by_ai"
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=True,
+                trigger_price=trigger_price,
+                ai_decision=position_decision.decision,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                stop_risk_basis=state_stop_risk_basis,
+            )
+            _persist_cycle_output(result)
+            logger.info(
+                "AI chose KEEP; existing position maintained | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "cycle_dir": cycle_dir,
+                        "position": _position_summary_for_log(result.get("position")),
+                    }
+                ),
+            )
+            return result
+
+        flip_result = _close_existing_position_for_flip(
+            api_key=api_key,
+            api_secret=api_secret,
+            symbol=symbol,
+            current_position=current_position,
+        )
+        result["flip_execution"] = flip_result
+        if not bool(flip_result.get("success")):
+            result["action"] = str(flip_result.get("action") or "close_position_failed")
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=True,
+                trigger_price=trigger_price,
+                ai_decision=position_decision.decision,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                stop_risk_basis=state_stop_risk_basis,
+            )
+            _persist_cycle_output(result)
+            logger.error(
+                "Failed to close position after AI FLIP decision | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "cycle_dir": cycle_dir,
+                        "flip_execution": flip_result,
+                    }
+                ),
+            )
+            return result
+
+        flipped_before_entry = True
+        current_position = None
+        state_stop_risk_basis = None
+        result["position"] = None
+        result["stop_risk_basis"] = None
+
+        entry_analysis: Dict[str, Any] = {}
+        entry_decision = evaluate_hakai_entry_direction(
+            cycle_dir=cycle_dir,
+            symbol=symbol,
+            reference_price=reference_price,
+            timeframe_ohlcv=market_context["timeframes"],
+            api_version=str(config["gemini_api_version"]),
+            thinking_level=str(config["gemini_thinking_level"]),
+            analysis_sink=entry_analysis,
+            current_position_snapshot=None,
+        )
+        result["entry_ai_analysis"] = dict(entry_analysis)
+        if entry_decision is None:
+            result["action"] = "ai_decision_failed"
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=True,
+                trigger_price=trigger_price,
+                ai_decision=position_decision.decision,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                stop_risk_basis=None,
+            )
+            _emit_notification(
+                notification_callback,
+                "ai_cycle_after",
+                {
+                    "timestamp": _current_time_utc().isoformat(),
+                    "success": False,
+                    "symbol": symbol,
+                    "cycle_dir": cycle_dir,
+                    "current_price": reference_price,
+                    "trigger_reason": trigger_info.get("reason"),
+                    "decision": None,
+                    "analysis": dict(entry_analysis),
+                    "position_sizing": dict(fixed_position_sizing),
+                    "position": None,
+                    "decision_mode": "entry_after_flip",
+                },
+            )
+            _persist_cycle_output(result)
+            logger.error(
+                "AI entry decision failed after FLIP close | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "cycle_dir": cycle_dir,
+                        "current_price": reference_price,
+                        "trigger_reason": trigger_info.get("reason"),
+                        "entry_ai_analysis": entry_analysis,
+                    }
+                ),
+            )
+            return result
+
+        result["entry_ai_decision"] = entry_decision.decision
+        result["ai_decision"] = entry_decision.decision
+        result["ai_analysis"] = dict(entry_analysis)
+        _emit_notification(
+            notification_callback,
+            "ai_cycle_after",
+            {
+                "timestamp": _current_time_utc().isoformat(),
+                "success": True,
+                "symbol": symbol,
+                "cycle_dir": cycle_dir,
+                "current_price": reference_price,
+                "trigger_reason": trigger_info.get("reason"),
+                "decision": entry_decision.decision,
+                "analysis": dict(entry_analysis),
+                "position_sizing": dict(fixed_position_sizing),
+                "position": None,
+                "decision_mode": "entry_after_flip",
+            },
+        )
+
+        if entry_decision.decision == "FLAT":
+            result["success"] = True
+            result["action"] = "flipped_to_flat"
+            result["state_update"] = _build_state_update(
+                previous_state=previous_state,
+                trigger_pct_usdt=trigger_pct_usdt,
+                ai_triggered=True,
+                trigger_price=trigger_price,
+                ai_decision=entry_decision.decision,
+                next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+                next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+                stop_risk_basis=None,
+            )
+            _persist_cycle_output(result)
+            logger.info(
+                "AI chose FLAT after FLIP close; no new entry submitted | %s",
+                format_log_details(
+                    {
+                        "symbol": symbol,
+                        "cycle_dir": cycle_dir,
+                        "flip_execution": flip_result,
+                    }
+                ),
+            )
+            return result
+
+        entry_decision_value = entry_decision.decision
+
+    if entry_decision_value not in _DIRECTIONAL_AI_DECISIONS:
+        result["action"] = "invalid_ai_decision"
+        result["state_update"] = _build_state_update(
+            previous_state=previous_state,
+            trigger_pct_usdt=trigger_pct_usdt,
+            ai_triggered=True,
+            trigger_price=trigger_price,
+            ai_decision=entry_decision_value,
+            next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
+            next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
+            stop_risk_basis=state_stop_risk_basis,
+        )
+        _persist_cycle_output(result)
+        return result
 
     account_equity = prefetched_account_equity
     if account_equity is None:
@@ -2784,7 +3199,7 @@ def run_hakai_cycle(
             trigger_pct_usdt=trigger_pct_usdt,
             ai_triggered=True,
             trigger_price=trigger_price,
-            ai_decision=ai_decision.decision,
+            ai_decision=entry_decision_value,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
             stop_risk_basis=state_stop_risk_basis,
@@ -2822,7 +3237,7 @@ def run_hakai_cycle(
             trigger_pct_usdt=trigger_pct_usdt,
             ai_triggered=True,
             trigger_price=trigger_price,
-            ai_decision=ai_decision.decision,
+            ai_decision=entry_decision_value,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
             stop_risk_basis=state_stop_risk_basis,
@@ -2851,18 +3266,24 @@ def run_hakai_cycle(
             api_key=api_key,
             api_secret=api_secret,
             symbol=symbol,
-            decision=ai_decision.decision,
+            decision=str(entry_decision_value),
             target_notional_usdt=target_notional_usdt,
             reference_price=reference_price,
             leverage=leverage,
         )
+        if (
+            flipped_before_entry
+            and bool(execution_result.get("success"))
+            and str(execution_result.get("action") or "") == "opened_new_position"
+        ):
+            execution_result["action"] = "flipped_and_opened_position"
     else:
         execution_result = _rebalance_existing_position(
             api_key=api_key,
             api_secret=api_secret,
             symbol=symbol,
             current_position=current_position,
-            decision=ai_decision.decision,
+            decision=str(entry_decision_value),
             target_notional_usdt=target_notional_usdt,
             reference_price=reference_price,
             leverage=leverage,
@@ -2874,7 +3295,7 @@ def run_hakai_cycle(
         format_log_details(
             {
                 "symbol": symbol,
-                "decision": ai_decision.decision,
+                "decision": entry_decision_value,
                 "execution": execution_result,
             }
         ),
@@ -2886,7 +3307,7 @@ def run_hakai_cycle(
             trigger_pct_usdt=trigger_pct_usdt,
             ai_triggered=True,
             trigger_price=trigger_price,
-            ai_decision=ai_decision.decision,
+            ai_decision=entry_decision_value,
             next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
             next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
             stop_risk_basis=state_stop_risk_basis,
@@ -2898,7 +3319,7 @@ def run_hakai_cycle(
                 {
                     "symbol": symbol,
                     "cycle_dir": cycle_dir,
-                    "decision": ai_decision.decision,
+                    "decision": entry_decision_value,
                     "execution": execution_result,
                 }
             ),
@@ -2910,7 +3331,7 @@ def run_hakai_cycle(
         api_key=api_key,
         api_secret=api_secret,
         symbol=symbol,
-        previous_position=current_position,
+        previous_position=execution_previous_position,
         expected_action=execution_action,
     )
     if synced_position is not None:
@@ -2952,7 +3373,7 @@ def run_hakai_cycle(
         trigger_pct_usdt=trigger_pct_usdt,
         ai_triggered=True,
         trigger_price=trigger_price,
-        ai_decision=ai_decision.decision,
+        ai_decision=entry_decision_value,
         next_trigger_down=_normalize_trigger_price(trigger_info.get("next_trigger_down")),
         next_trigger_up=_normalize_trigger_price(trigger_info.get("next_trigger_up")),
         stop_risk_basis=state_stop_risk_basis,

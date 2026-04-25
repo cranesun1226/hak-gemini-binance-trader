@@ -84,10 +84,18 @@ _GEMINI_MODEL_PRICING_USD_PER_MILLION: dict[str, dict[str, Any]] = {
 
 
 class HakaiTradeDirectionDecision(BaseModel):
-    """Structured Gemini response containing the required directional decision."""
+    """Structured Gemini response for a flat-aware initial entry decision."""
 
-    decision: Literal["LONG", "SHORT"] = Field(
-        description="Return exactly one BTCUSDT directional decision (LONG or SHORT) based only on the supplied market and position context."
+    decision: Literal["LONG", "SHORT", "FLAT"] = Field(
+        description="Return exactly one BTCUSDT initial-entry decision (LONG, SHORT, or FLAT) based only on the supplied market context."
+    )
+
+
+class HakaiPositionManagementDecision(BaseModel):
+    """Structured Gemini response for managing an existing BTCUSDT position."""
+
+    decision: Literal["KEEP", "FLIP"] = Field(
+        description="Return exactly one existing-position management decision: KEEP the current position or FLIP by closing it."
     )
 
 
@@ -337,34 +345,84 @@ def _is_retryable_gemini_error(exc: Exception) -> bool:
     )
 
 
-def _build_direction_input_payload(
+def _normalize_prompt_position(current_position_snapshot: Optional[Dict[str, Any]]) -> str:
+    normalized_position_snapshot = dict(current_position_snapshot or {})
+    raw_position = str(
+        normalized_position_snapshot.get("direction") or normalized_position_snapshot.get("decision") or ""
+    ).strip().upper()
+    return raw_position if raw_position in {"LONG", "SHORT"} else "NONE"
+
+
+def _build_entry_input_payload(
     *,
     symbol: str,
     reference_price: float,
     timeframe_ohlcv: Dict[str, Any],
     current_position_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    normalized_position_snapshot = dict(current_position_snapshot or {})
-    raw_position = str(
-        normalized_position_snapshot.get("direction") or normalized_position_snapshot.get("decision") or ""
-    ).strip().upper()
-    current_position = raw_position if raw_position in {"LONG", "SHORT"} else "NONE"
+    del current_position_snapshot
     return {
         "symbol": symbol,
         "current_price": reference_price,
-        "current_position": current_position,
+        "current_position": "NONE",
         "ohlcv": timeframe_ohlcv,
     }
 
 
-def _build_direction_prompt(
+def _build_entry_prompt(
     *,
     symbol: str,
     reference_price: float,
     timeframe_ohlcv: Dict[str, Any],
     current_position_snapshot: Optional[Dict[str, Any]] = None,
 ) -> str:
-    payload = _build_direction_input_payload(
+    payload = _build_entry_input_payload(
+        symbol=symbol,
+        reference_price=reference_price,
+        timeframe_ohlcv=timeframe_ohlcv,
+        current_position_snapshot=current_position_snapshot,
+    )
+    return (
+        "You are a world-best BTCUSDT futures trader.\n"
+        f"Current Price: {reference_price}, Current Position: NONE\n"
+        "Initial-entry task: choose LONG, SHORT, or FLAT.\n"
+        "Choose LONG or SHORT only when the supplied 15m market structure shows a clearly directional, high-conviction setup with strong acceptance, momentum, volume, and location evidence.\n"
+        "Choose FLAT for every ambiguous, range-bound, choppy, balanced, compressed, conflicting, ordinary, late/exhausted, unconfirmed breakout/breakdown, or low-conviction situation. FLAT means hold no position.\n"
+        "Do not get shaken by ordinary and usual candles. Identify the dominant and important candles within the full market structure, and let them drive your directional decision.\n"
+        "Use the provided 15m OHLCV candles to judge market regime, structure, trend quality, continuation vs reversal, impulse vs correction, healthy pullback vs structural damage, exhaustion vs re-acceleration, breakout/breakdown acceptance vs failure, retest hold vs rejection, balance vs imbalance, volatility expansion vs compression, momentum and volume confirmation vs divergence, liquidity sweeps, and location relative to key swings and range boundaries.\n"
+        "Since my assets are in your hands, please act responsibly.\n"
+        "Schema: {\"decision\":\"LONG\"}, {\"decision\":\"SHORT\"}, or {\"decision\":\"FLAT\"}.\n"
+        "Return JSON only.\n"
+        "Within the 15m candle array, candle rows are ordered from oldest to most recent.\n"
+        "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"NONE\", \"ohlcv\": {\"15m\": [[open, high, low, close, volume], ...]}}.\n\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _build_position_management_input_payload(
+    *,
+    symbol: str,
+    reference_price: float,
+    timeframe_ohlcv: Dict[str, Any],
+    current_position_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "current_price": reference_price,
+        "current_position": _normalize_prompt_position(current_position_snapshot),
+        "position": dict(current_position_snapshot or {}),
+        "ohlcv": timeframe_ohlcv,
+    }
+
+
+def _build_position_management_prompt(
+    *,
+    symbol: str,
+    reference_price: float,
+    timeframe_ohlcv: Dict[str, Any],
+    current_position_snapshot: Optional[Dict[str, Any]] = None,
+) -> str:
+    payload = _build_position_management_input_payload(
         symbol=symbol,
         reference_price=reference_price,
         timeframe_ohlcv=timeframe_ohlcv,
@@ -374,15 +432,47 @@ def _build_direction_prompt(
     return (
         "You are a world-best BTCUSDT futures trader.\n"
         f"Current Price: {reference_price}, Current Position: {current_position}\n"
-        "As a trader, rationally choose to hold or switch LONG/SHORT position. If Current Position is NONE, choose the higher-conviction directional setup between LONG and SHORT.\n"
-        "Do not get shaken by ordinary and usual candles. Identify the dominant and important candles within the full market structure, and let them drive your directional decision.\n"
+        "Existing-position task: rationally choose KEEP or FLIP for the current LONG/SHORT position.\n"
+        "KEEP means maintain the existing position. FLIP means close the existing position and return to no position; a separate initial-entry decision will then evaluate LONG, SHORT, or FLAT.\n"
+        "Do not choose a new direction in this response. Decide only whether the current position still deserves to be held or should be closed.\n"
+        "Do not get shaken by ordinary and usual candles. Identify the dominant and important candles within the full market structure, and let them drive your position-management decision.\n"
         "Use the provided 15m OHLCV candles to judge market regime, structure, trend quality, continuation vs reversal, impulse vs correction, healthy pullback vs structural damage, exhaustion vs re-acceleration, breakout/breakdown acceptance vs failure, retest hold vs rejection, balance vs imbalance, volatility expansion vs compression, momentum and volume confirmation vs divergence, liquidity sweeps, and location relative to key swings and range boundaries.\n"
         "Since my assets are in your hands, please act responsibly.\n"
-        "Schema: {\"decision\":\"LONG\"} or {\"decision\":\"SHORT\"}.\n"
+        "Schema: {\"decision\":\"KEEP\"} or {\"decision\":\"FLIP\"}.\n"
         "Return JSON only.\n"
         "Within the 15m candle array, candle rows are ordered from oldest to most recent.\n"
-        "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"LONG\"|\"SHORT\"|\"NONE\", \"ohlcv\": {\"15m\": [[open, high, low, close, volume], ...]}}.\n\n"
+        "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"LONG\"|\"SHORT\", \"position\": object, \"ohlcv\": {\"15m\": [[open, high, low, close, volume], ...]}}.\n\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _build_direction_input_payload(
+    *,
+    symbol: str,
+    reference_price: float,
+    timeframe_ohlcv: Dict[str, Any],
+    current_position_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return _build_entry_input_payload(
+        symbol=symbol,
+        reference_price=reference_price,
+        timeframe_ohlcv=timeframe_ohlcv,
+        current_position_snapshot=current_position_snapshot,
+    )
+
+
+def _build_direction_prompt(
+    *,
+    symbol: str,
+    reference_price: float,
+    timeframe_ohlcv: Dict[str, Any],
+    current_position_snapshot: Optional[Dict[str, Any]] = None,
+) -> str:
+    return _build_entry_prompt(
+        symbol=symbol,
+        reference_price=reference_price,
+        timeframe_ohlcv=timeframe_ohlcv,
+        current_position_snapshot=current_position_snapshot,
     )
 
 
@@ -392,7 +482,7 @@ def _save_direction_analysis_data(
     prompt: str,
     prompt_payload: Dict[str, Any],
     raw_response: str,
-    decision: HakaiTradeDirectionDecision,
+    decision: Any,
     usage_metadata: Optional[Dict[str, Any]],
     response_payload: Optional[Dict[str, Any]],
     thought_summary: str,
@@ -400,15 +490,28 @@ def _save_direction_analysis_data(
     model: str,
     thinking_level: str,
     api_version: str,
+    decision_mode: str = "entry",
 ) -> None:
     try:
-        input_path = os.path.join(cycle_dir, "hakai_ai_input.json")
+        normalized_mode = str(decision_mode or "entry").strip().lower() or "entry"
+        input_filename = (
+            "hakai_ai_input.json"
+            if normalized_mode == "entry"
+            else f"hakai_ai_{normalized_mode}_input.json"
+        )
+        output_filename = (
+            "hakai_ai_output.json"
+            if normalized_mode == "entry"
+            else f"hakai_ai_{normalized_mode}_output.json"
+        )
+        input_path = os.path.join(cycle_dir, input_filename)
         with open(input_path, "w", encoding="utf-8") as file_obj:
             json.dump(
                 {
                     "model": model,
                     "api_version": api_version,
                     "thinking_level": thinking_level,
+                    "decision_mode": normalized_mode,
                     "payload_summary": {
                         "timeframes": _summarize_timeframe_ohlcv(prompt_payload.get("ohlcv") or {}),
                     },
@@ -420,10 +523,11 @@ def _save_direction_analysis_data(
                 ensure_ascii=False,
             )
 
-        output_path = os.path.join(cycle_dir, "hakai_ai_output.json")
+        output_path = os.path.join(cycle_dir, output_filename)
         with open(output_path, "w", encoding="utf-8") as file_obj:
             json.dump(
                 {
+                    "decision_mode": normalized_mode,
                     "decision": decision.model_dump(),
                     "raw_response": raw_response,
                     "thought_summary": thought_summary,
@@ -442,6 +546,7 @@ def _save_direction_analysis_data(
                     "cycle_dir": cycle_dir,
                     "input_path": input_path,
                     "output_path": output_path,
+                    "decision_mode": normalized_mode,
                     "decision": decision.model_dump(),
                     "thought_signatures": len(thought_signatures),
                     "thought_summary_chars": len(thought_summary or ""),
@@ -452,12 +557,14 @@ def _save_direction_analysis_data(
         logger.warning("Failed to save HAK GEMINI BINANCE TRADER AI analysis data: %s", exc)
 
 
-def _call_gemini_direction_decision(
+def _call_gemini_structured_decision(
     *,
     prompt: str,
     api_version: str,
     thinking_level: str,
-) -> Optional[GeminiStructuredResponse[HakaiTradeDirectionDecision]]:
+    response_model: type[DecisionT],
+    context_label: str,
+) -> Optional[GeminiStructuredResponse[DecisionT]]:
     if genai is None or types is None:
         logger.error("google-genai dependency is unavailable")
         return None
@@ -472,9 +579,10 @@ def _call_gemini_direction_decision(
     for attempt in range(1, GEMINI_GENERATE_MAX_RETRIES + 1):
         try:
             logger.info(
-                "Gemini BTC direction call starting | %s",
+                "Gemini BTC decision call starting | %s",
                 format_log_details(
                     {
+                        "context": context_label,
                         "attempt": attempt,
                         "max_retries": GEMINI_GENERATE_MAX_RETRIES,
                         "model": GEMINI_DIRECTION_MODEL,
@@ -493,22 +601,23 @@ def _call_gemini_direction_decision(
                         include_thoughts=True,
                     ),
                     response_mime_type="application/json",
-                    response_json_schema=HakaiTradeDirectionDecision.model_json_schema(),
+                    response_json_schema=response_model.model_json_schema(),
                 ),
             )
-            decision = HakaiTradeDirectionDecision.model_validate_json(response.text)
+            decision = response_model.model_validate_json(response.text)
             usage_metadata = extract_usage_metadata(response)
             response_payload = _extract_response_payload(response)
             log_usage_metadata(
                 logger,
-                context="Gemini BTC direction",
+                context=f"Gemini BTC {context_label}",
                 usage_metadata=usage_metadata,
                 model=GEMINI_DIRECTION_MODEL,
             )
             logger.info(
-                "Gemini BTC direction call succeeded | %s",
+                "Gemini BTC decision call succeeded | %s",
                 format_log_details(
                     {
+                        "context": context_label,
                         "model": GEMINI_DIRECTION_MODEL,
                         "raw_response": str(getattr(response, "text", "") or ""),
                         "thought_summary_chars": len(extract_thought_summary(response_payload)),
@@ -530,7 +639,8 @@ def _call_gemini_direction_decision(
                 break
             retry_delay = 2 ** (attempt - 1)
             logger.warning(
-                "Gemini BTC direction call failed (attempt %s/%s): %s. Retrying in %ss.",
+                "Gemini BTC %s call failed (attempt %s/%s): %s. Retrying in %ss.",
+                context_label,
                 attempt,
                 GEMINI_GENERATE_MAX_RETRIES,
                 exc,
@@ -539,11 +649,26 @@ def _call_gemini_direction_decision(
             time.sleep(retry_delay)
 
     if last_error is not None:
-        logger.error("Gemini BTC direction call failed: %s", last_error, exc_info=True)
+        logger.error("Gemini BTC %s call failed: %s", context_label, last_error, exc_info=True)
     return None
 
 
-def evaluate_hakai_direction(
+def _call_gemini_direction_decision(
+    *,
+    prompt: str,
+    api_version: str,
+    thinking_level: str,
+) -> Optional[GeminiStructuredResponse[HakaiTradeDirectionDecision]]:
+    return _call_gemini_structured_decision(
+        prompt=prompt,
+        api_version=api_version,
+        thinking_level=thinking_level,
+        response_model=HakaiTradeDirectionDecision,
+        context_label="entry",
+    )
+
+
+def evaluate_hakai_entry_direction(
     *,
     cycle_dir: str,
     symbol: str,
@@ -554,30 +679,31 @@ def evaluate_hakai_direction(
     analysis_sink: Optional[Dict[str, Any]] = None,
     current_position_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Optional[HakaiTradeDirectionDecision]:
-    """Request a BTCUSDT LONG/SHORT decision and persist the analysis artifacts."""
+    """Request a BTCUSDT LONG/SHORT/FLAT initial-entry decision and persist artifacts."""
     normalized_symbol = str(symbol or "").strip().upper()
     if normalized_symbol != "BTCUSDT":
-        logger.error("evaluate_hakai_direction only supports BTCUSDT | received=%s", symbol)
+        logger.error("evaluate_hakai_entry_direction only supports BTCUSDT | received=%s", symbol)
         return None
 
-    prompt_payload = _build_direction_input_payload(
+    prompt_payload = _build_entry_input_payload(
         symbol=normalized_symbol,
         reference_price=reference_price,
         timeframe_ohlcv=timeframe_ohlcv,
         current_position_snapshot=current_position_snapshot,
     )
-    prompt = _build_direction_prompt(
+    prompt = _build_entry_prompt(
         symbol=normalized_symbol,
         reference_price=reference_price,
         timeframe_ohlcv=timeframe_ohlcv,
         current_position_snapshot=current_position_snapshot,
     )
     logger.info(
-        "Evaluating HAK GEMINI BINANCE TRADER AI direction | %s",
+        "Evaluating HAK GEMINI BINANCE TRADER AI entry direction | %s",
         format_log_details(
             {
                 "symbol": normalized_symbol,
                 "reference_price": reference_price,
+                "decision_mode": "entry",
                 "api_version": api_version,
                 "thinking_level": thinking_level,
                 "cycle_dir": cycle_dir,
@@ -602,8 +728,8 @@ def evaluate_hakai_direction(
     decision = call_result.decision
     raw_response = call_result.raw_response or decision.model_dump_json(indent=2)
     normalized_value = str(getattr(decision, "decision", "") or "").strip().upper()
-    if normalized_value not in {"LONG", "SHORT"}:
-        logger.error("Gemini returned invalid BTC direction decision=%s", normalized_value)
+    if normalized_value not in {"LONG", "SHORT", "FLAT"}:
+        logger.error("Gemini returned invalid BTC entry decision=%s", normalized_value)
         return None
 
     normalized_decision = HakaiTradeDirectionDecision(decision=normalized_value)
@@ -620,12 +746,14 @@ def evaluate_hakai_direction(
         model=GEMINI_DIRECTION_MODEL,
         thinking_level=thinking_level,
         api_version=api_version,
+        decision_mode="entry",
     )
     logger.info(
-        "HAK GEMINI BINANCE TRADER AI direction finalized | %s",
+        "HAK GEMINI BINANCE TRADER AI entry direction finalized | %s",
         format_log_details(
             {
                 "symbol": normalized_symbol,
+                "decision_mode": "entry",
                 "decision": normalized_value,
                 "thought_signatures": len(call_result.thought_signatures),
                 "thought_summary_chars": len(call_result.thought_summary or ""),
@@ -641,6 +769,7 @@ def evaluate_hakai_direction(
                 "model": GEMINI_DIRECTION_MODEL,
                 "api_version": api_version,
                 "thinking_level": thinking_level,
+                "decision_mode": "entry",
                 "decision": normalized_decision.model_dump(),
                 "raw_response": raw_response,
                 "thought_summary": call_result.thought_summary,
@@ -654,13 +783,167 @@ def evaluate_hakai_direction(
     return normalized_decision
 
 
+def evaluate_hakai_position_management(
+    *,
+    cycle_dir: str,
+    symbol: str,
+    reference_price: float,
+    timeframe_ohlcv: Dict[str, Any],
+    api_version: str,
+    thinking_level: str,
+    analysis_sink: Optional[Dict[str, Any]] = None,
+    current_position_snapshot: Optional[Dict[str, Any]] = None,
+) -> Optional[HakaiPositionManagementDecision]:
+    """Request a BTCUSDT KEEP/FLIP decision for an existing position."""
+    normalized_symbol = str(symbol or "").strip().upper()
+    if normalized_symbol != "BTCUSDT":
+        logger.error("evaluate_hakai_position_management only supports BTCUSDT | received=%s", symbol)
+        return None
+
+    prompt_payload = _build_position_management_input_payload(
+        symbol=normalized_symbol,
+        reference_price=reference_price,
+        timeframe_ohlcv=timeframe_ohlcv,
+        current_position_snapshot=current_position_snapshot,
+    )
+    current_position = str(prompt_payload.get("current_position") or "NONE").strip().upper()
+    if current_position not in {"LONG", "SHORT"}:
+        logger.error(
+            "evaluate_hakai_position_management requires an open BTCUSDT position | current_position=%s",
+            current_position,
+        )
+        return None
+
+    prompt = _build_position_management_prompt(
+        symbol=normalized_symbol,
+        reference_price=reference_price,
+        timeframe_ohlcv=timeframe_ohlcv,
+        current_position_snapshot=current_position_snapshot,
+    )
+    logger.info(
+        "Evaluating HAK GEMINI BINANCE TRADER AI position management | %s",
+        format_log_details(
+            {
+                "symbol": normalized_symbol,
+                "reference_price": reference_price,
+                "decision_mode": "position",
+                "current_position": current_position,
+                "api_version": api_version,
+                "thinking_level": thinking_level,
+                "cycle_dir": cycle_dir,
+                "ai_prompt_timeframes": _summarize_timeframe_ohlcv(timeframe_ohlcv),
+            }
+        ),
+    )
+
+    try:
+        call_result = _call_gemini_structured_decision(
+            prompt=prompt,
+            api_version=api_version,
+            thinking_level=thinking_level,
+            response_model=HakaiPositionManagementDecision,
+            context_label="position",
+        )
+    except ValueError as exc:
+        logger.error(str(exc))
+        return None
+    if call_result is None:
+        return None
+
+    decision = call_result.decision
+    raw_response = call_result.raw_response or decision.model_dump_json(indent=2)
+    normalized_value = str(getattr(decision, "decision", "") or "").strip().upper()
+    if normalized_value not in {"KEEP", "FLIP"}:
+        logger.error("Gemini returned invalid BTC position-management decision=%s", normalized_value)
+        return None
+
+    normalized_decision = HakaiPositionManagementDecision(decision=normalized_value)
+    _save_direction_analysis_data(
+        cycle_dir,
+        prompt=prompt,
+        prompt_payload=prompt_payload,
+        raw_response=raw_response,
+        decision=normalized_decision,
+        usage_metadata=call_result.usage_metadata,
+        response_payload=call_result.response_payload,
+        thought_summary=call_result.thought_summary,
+        thought_signatures=call_result.thought_signatures,
+        model=GEMINI_DIRECTION_MODEL,
+        thinking_level=thinking_level,
+        api_version=api_version,
+        decision_mode="position",
+    )
+    logger.info(
+        "HAK GEMINI BINANCE TRADER AI position management finalized | %s",
+        format_log_details(
+            {
+                "symbol": normalized_symbol,
+                "decision_mode": "position",
+                "current_position": current_position,
+                "decision": normalized_value,
+                "thought_signatures": len(call_result.thought_signatures),
+                "thought_summary_chars": len(call_result.thought_summary or ""),
+                "usage_metadata": call_result.usage_metadata,
+                "cycle_dir": cycle_dir,
+            }
+        ),
+    )
+    if isinstance(analysis_sink, dict):
+        analysis_sink.clear()
+        analysis_sink.update(
+            {
+                "model": GEMINI_DIRECTION_MODEL,
+                "api_version": api_version,
+                "thinking_level": thinking_level,
+                "decision_mode": "position",
+                "current_position": current_position,
+                "decision": normalized_decision.model_dump(),
+                "raw_response": raw_response,
+                "thought_summary": call_result.thought_summary,
+                "thought_signatures": list(call_result.thought_signatures),
+                "usage_metadata": dict(call_result.usage_metadata or {}),
+                "response_payload": dict(call_result.response_payload or {}),
+                "input_path": os.path.join(cycle_dir, "hakai_ai_position_input.json"),
+                "output_path": os.path.join(cycle_dir, "hakai_ai_position_output.json"),
+            }
+        )
+    return normalized_decision
+
+
+def evaluate_hakai_direction(
+    *,
+    cycle_dir: str,
+    symbol: str,
+    reference_price: float,
+    timeframe_ohlcv: Dict[str, Any],
+    api_version: str,
+    thinking_level: str,
+    analysis_sink: Optional[Dict[str, Any]] = None,
+    current_position_snapshot: Optional[Dict[str, Any]] = None,
+) -> Optional[HakaiTradeDirectionDecision]:
+    """Backward-compatible alias for the flat-aware initial-entry decision."""
+    return evaluate_hakai_entry_direction(
+        cycle_dir=cycle_dir,
+        symbol=symbol,
+        reference_price=reference_price,
+        timeframe_ohlcv=timeframe_ohlcv,
+        api_version=api_version,
+        thinking_level=thinking_level,
+        analysis_sink=analysis_sink,
+        current_position_snapshot=current_position_snapshot,
+    )
+
+
 __all__ = [
     "GEMINI_DIRECTION_MODEL",
     "GEMINI_PRO_ONLY_MODEL",
     "GeminiStructuredResponse",
+    "HakaiPositionManagementDecision",
     "HakaiTradeDirectionDecision",
     "estimate_gemini_cost",
+    "evaluate_hakai_entry_direction",
     "evaluate_hakai_direction",
+    "evaluate_hakai_position_management",
     "extract_thought_signatures",
     "extract_thought_summary",
     "extract_usage_metadata",

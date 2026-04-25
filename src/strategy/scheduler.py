@@ -37,6 +37,11 @@ ACTION_LABELS = {
     "hold_waiting_round_trigger": "Waiting for next round",
     "hold_waiting_price_trigger": "Waiting for next price level",
     "hold_stop_updated": "Position kept, stop updated",
+    "flat_no_entry": "Flat, no entry",
+    "kept_position_by_ai": "Position kept by AI",
+    "flipped_position_closed": "Position closed by flip",
+    "flipped_to_flat": "Flipped to flat",
+    "flipped_and_opened_position": "Flipped and opened new position",
     "opened_new_position": "Opened new position",
     "scaled_in_position": "Scaled in position",
     "scaled_out_position": "Scaled out position",
@@ -685,7 +690,7 @@ class TradingScheduler:
             title=self._format_html_title("AI Decision", emoji="🧠"),
             summary_lines=[
                 self._format_html_line("Symbol", payload.get("symbol"), code=True),
-                self._format_html_line("Direction", payload.get("decision") or "None", bold=True),
+                self._format_html_line("Decision", payload.get("decision") or "None", bold=True),
             ],
             sections=sections,
         )
@@ -765,7 +770,7 @@ class TradingScheduler:
                 self._format_html_line("Price", self._format_usdt(payload.get("current_price"))),
                 self._format_html_line("Action", self._translate_action(payload.get("action"))),
                 self._format_html_line("Trigger", self._translate_trigger_reason(payload.get("trigger_reason"))),
-                self._format_html_line("Direction", direction, bold=True),
+                self._format_html_line("Decision", direction, bold=True),
             ],
             sections=sections,
         )
@@ -784,7 +789,7 @@ class TradingScheduler:
                         self._format_html_line("Position", self._format_position_summary(payload.get("position"))),
                         self._format_html_line("Status", self._translate_action(payload.get("action"))),
                         self._format_html_line(
-                            "AI Direction",
+                            "AI Decision",
                             payload.get("last_ai_decision") or payload.get("ai_decision") or "None",
                             bold=True,
                         ),

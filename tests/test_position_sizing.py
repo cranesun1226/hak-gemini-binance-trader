@@ -40,6 +40,29 @@ class FixedPositionSizingTests(unittest.TestCase):
         self.assertNotIn("position_sizing_unlocked", state_update)
         self.assertNotIn("position_sizing_activated_at", state_update)
 
+    def test_state_update_accepts_flat_and_position_management_decisions(self):
+        flat_update = hakai_strategy._build_state_update(
+            previous_state={},
+            trigger_pct_usdt=0.75,
+            ai_triggered=True,
+            trigger_price=100000.0,
+            ai_decision="FLAT",
+            next_trigger_down=99250.0,
+            next_trigger_up=100750.0,
+        )
+        keep_update = hakai_strategy._build_state_update(
+            previous_state=flat_update,
+            trigger_pct_usdt=0.75,
+            ai_triggered=True,
+            trigger_price=100750.0,
+            ai_decision="KEEP",
+            next_trigger_down=99994.38,
+            next_trigger_up=101505.62,
+        )
+
+        self.assertEqual(flat_update["last_ai_decision"], "FLAT")
+        self.assertEqual(keep_update["last_ai_decision"], "KEEP")
+
 
 if __name__ == "__main__":
     unittest.main()
