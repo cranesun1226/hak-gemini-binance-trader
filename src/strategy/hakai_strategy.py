@@ -70,7 +70,7 @@ _INITIAL_ENTRY_VOLATILITY_COOLDOWN_CANDLE_COUNT = 2
 NotificationCallback = Optional[Callable[[str, Dict[str, Any]], None]]
 _DIRECTIONAL_AI_DECISIONS = {"LONG", "SHORT"}
 _ENTRY_AI_DECISIONS = set(_DIRECTIONAL_AI_DECISIONS) | {"FLAT"}
-_POSITION_MANAGEMENT_AI_DECISIONS = {"KEEP", "FLIP"}
+_POSITION_MANAGEMENT_AI_DECISIONS = {"KEEP", "CLOSE"}
 _VALID_AI_DECISIONS = _ENTRY_AI_DECISIONS | _POSITION_MANAGEMENT_AI_DECISIONS
 _STATE_UNSET = object()
 
@@ -1881,7 +1881,7 @@ def _position_sync_matches_expected(
     snapshot_metrics = calculate_position_metrics(snapshot)
     snapshot_size = abs(_safe_float(snapshot_metrics.get("size"), 0.0) or 0.0)
     snapshot_direction = str(snapshot_metrics.get("direction") or "").strip().lower()
-    if normalized_action in {"opened_new_position", "flipped_and_opened_position"}:
+    if normalized_action in {"opened_new_position", "closed_and_opened_position"}:
         return snapshot_size > 0.0 and snapshot_direction in ("long", "short")
 
     if previous_position is None:
@@ -2281,7 +2281,7 @@ def _rebalance_existing_position(
     }
 
 
-def _close_existing_position_for_flip(
+def _close_existing_position_for_ai_close(
     *,
     api_key: str,
     api_secret: str,
@@ -2316,7 +2316,7 @@ def _close_existing_position_for_flip(
         api_key,
         api_secret,
         [symbol],
-        context="flip_position",
+        context="ai_close_position",
     )
     cancel_all_orders(api_key, api_secret, symbol)
     if not close_propagated:
@@ -2329,7 +2329,7 @@ def _close_existing_position_for_flip(
         }
     return {
         "success": True,
-        "action": "flipped_position_closed",
+        "action": "closed_position",
         "closed_direction": current_direction,
         "closed_qty": current_size,
         "close_propagated": close_propagated,
@@ -2792,7 +2792,7 @@ def run_hakai_cycle(
 
     entry_decision_value: Optional[str] = None
     execution_previous_position = current_position
-    flipped_before_entry = False
+    closed_before_entry = False
 
     if current_position is None:
         ai_decision = evaluate_hakai_entry_direction(
@@ -3031,15 +3031,15 @@ def run_hakai_cycle(
             )
             return result
 
-        flip_result = _close_existing_position_for_flip(
+        close_result = _close_existing_position_for_ai_close(
             api_key=api_key,
             api_secret=api_secret,
             symbol=symbol,
             current_position=current_position,
         )
-        result["flip_execution"] = flip_result
-        if not bool(flip_result.get("success")):
-            result["action"] = str(flip_result.get("action") or "close_position_failed")
+        result["close_execution"] = close_result
+        if not bool(close_result.get("success")):
+            result["action"] = str(close_result.get("action") or "close_position_failed")
             result["state_update"] = _build_state_update(
                 previous_state=previous_state,
                 trigger_pct_usdt=trigger_pct_usdt,
@@ -3052,18 +3052,18 @@ def run_hakai_cycle(
             )
             _persist_cycle_output(result)
             logger.error(
-                "Failed to close position after AI FLIP decision | %s",
+                "Failed to close position after AI CLOSE decision | %s",
                 format_log_details(
                     {
                         "symbol": symbol,
                         "cycle_dir": cycle_dir,
-                        "flip_execution": flip_result,
+                        "close_execution": close_result,
                     }
                 ),
             )
             return result
 
-        flipped_before_entry = True
+        closed_before_entry = True
         current_position = None
         state_stop_risk_basis = None
         result["position"] = None
@@ -3107,12 +3107,12 @@ def run_hakai_cycle(
                     "analysis": dict(entry_analysis),
                     "position_sizing": dict(fixed_position_sizing),
                     "position": None,
-                    "decision_mode": "entry_after_flip",
+                    "decision_mode": "entry_after_close",
                 },
             )
             _persist_cycle_output(result)
             logger.error(
-                "AI entry decision failed after FLIP close | %s",
+                "AI entry decision failed after CLOSE decision | %s",
                 format_log_details(
                     {
                         "symbol": symbol,
@@ -3142,13 +3142,13 @@ def run_hakai_cycle(
                 "analysis": dict(entry_analysis),
                 "position_sizing": dict(fixed_position_sizing),
                 "position": None,
-                "decision_mode": "entry_after_flip",
+                "decision_mode": "entry_after_close",
             },
         )
 
         if entry_decision.decision == "FLAT":
             result["success"] = True
-            result["action"] = "flipped_to_flat"
+            result["action"] = "closed_to_flat"
             result["state_update"] = _build_state_update(
                 previous_state=previous_state,
                 trigger_pct_usdt=trigger_pct_usdt,
@@ -3161,12 +3161,12 @@ def run_hakai_cycle(
             )
             _persist_cycle_output(result)
             logger.info(
-                "AI chose FLAT after FLIP close; no new entry submitted | %s",
+                "AI chose FLAT after CLOSE decision; no new entry submitted | %s",
                 format_log_details(
                     {
                         "symbol": symbol,
                         "cycle_dir": cycle_dir,
-                        "flip_execution": flip_result,
+                        "close_execution": close_result,
                     }
                 ),
             )
@@ -3272,11 +3272,11 @@ def run_hakai_cycle(
             leverage=leverage,
         )
         if (
-            flipped_before_entry
+            closed_before_entry
             and bool(execution_result.get("success"))
             and str(execution_result.get("action") or "") == "opened_new_position"
         ):
-            execution_result["action"] = "flipped_and_opened_position"
+            execution_result["action"] = "closed_and_opened_position"
     else:
         execution_result = _rebalance_existing_position(
             api_key=api_key,

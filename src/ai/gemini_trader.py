@@ -94,8 +94,8 @@ class HakaiTradeDirectionDecision(BaseModel):
 class HakaiPositionManagementDecision(BaseModel):
     """Structured Gemini response for managing an existing BTCUSDT position."""
 
-    decision: Literal["KEEP", "FLIP"] = Field(
-        description="Return exactly one existing-position management decision: KEEP the current position or FLIP by closing it."
+    decision: Literal["KEEP", "CLOSE"] = Field(
+        description="Return exactly one existing-position management decision: KEEP the current position or CLOSE it."
     )
 
 
@@ -386,8 +386,9 @@ def _build_entry_prompt(
         "You are a world-best BTCUSDT futures trader.\n"
         f"Current Price: {reference_price}, Current Position: NONE\n"
         "Initial-entry task: choose LONG, SHORT, or FLAT.\n"
-        "Choose LONG or SHORT only when the supplied 15m market structure shows a clearly directional, high-conviction setup with strong acceptance, momentum, volume, and location evidence.\n"
-        "Choose FLAT for every ambiguous, range-bound, choppy, balanced, compressed, conflicting, ordinary, late/exhausted, unconfirmed breakout/breakdown, or low-conviction situation. FLAT means hold no position.\n"
+        "Choose LONG or SHORT when the supplied 15m market structure shows a reasonable directional edge, with enough alignment across structure, location, momentum, acceptance, or volume to justify taking an initial position.\n"
+        "Not every factor must be perfect. A valid LONG or SHORT can be chosen when the dominant structure and current location support an asymmetric opportunity, even if some secondary signals are mixed or not fully confirmed.\n"
+        "Choose FLAT when directional evidence is genuinely balanced, structurally unclear, late/exhausted without continuation evidence, or when the trade would depend mainly on guessing rather than observable market structure. FLAT means hold no position.\n"
         "Do not get shaken by ordinary and usual candles. Identify the dominant and important candles within the full market structure, and let them drive your directional decision.\n"
         "Use the provided 15m OHLCV candles to judge market regime, structure, trend quality, continuation vs reversal, impulse vs correction, healthy pullback vs structural damage, exhaustion vs re-acceleration, breakout/breakdown acceptance vs failure, retest hold vs rejection, balance vs imbalance, volatility expansion vs compression, momentum and volume confirmation vs divergence, liquidity sweeps, and location relative to key swings and range boundaries.\n"
         "Since my assets are in your hands, please act responsibly.\n"
@@ -432,13 +433,15 @@ def _build_position_management_prompt(
     return (
         "You are a world-best BTCUSDT futures trader.\n"
         f"Current Price: {reference_price}, Current Position: {current_position}\n"
-        "Existing-position task: rationally choose KEEP or FLIP for the current LONG/SHORT position.\n"
-        "KEEP means maintain the existing position. FLIP means close the existing position and return to no position; a separate initial-entry decision will then evaluate LONG, SHORT, or FLAT.\n"
+        "Existing-position task: rationally choose KEEP or CLOSE for the current LONG/SHORT position.\n"
+        "KEEP means maintain the existing position. CLOSE means close the existing position and return to no position; a separate initial-entry decision will then evaluate LONG, SHORT, or FLAT.\n"
         "Do not choose a new direction in this response. Decide only whether the current position still deserves to be held or should be closed.\n"
+        "Default to KEEP when the current position thesis remains reasonably valid. Do not CLOSE because of ordinary pullbacks, minor counter-trend candles, temporary consolidation, normal volatility, or incomplete continuation.\n"
+        "Choose CLOSE only when objective evidence shows that the current position has become irrational to hold: clear structural damage, confirmed acceptance against the position, failure of the original breakout/breakdown thesis, strong reversal with follow-through, or a decisive market-regime shift that invalidates the position.\n"
         "Do not get shaken by ordinary and usual candles. Identify the dominant and important candles within the full market structure, and let them drive your position-management decision.\n"
         "Use the provided 15m OHLCV candles to judge market regime, structure, trend quality, continuation vs reversal, impulse vs correction, healthy pullback vs structural damage, exhaustion vs re-acceleration, breakout/breakdown acceptance vs failure, retest hold vs rejection, balance vs imbalance, volatility expansion vs compression, momentum and volume confirmation vs divergence, liquidity sweeps, and location relative to key swings and range boundaries.\n"
         "Since my assets are in your hands, please act responsibly.\n"
-        "Schema: {\"decision\":\"KEEP\"} or {\"decision\":\"FLIP\"}.\n"
+        "Schema: {\"decision\":\"KEEP\"} or {\"decision\":\"CLOSE\"}.\n"
         "Return JSON only.\n"
         "Within the 15m candle array, candle rows are ordered from oldest to most recent.\n"
         "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"LONG\"|\"SHORT\", \"position\": object, \"ohlcv\": {\"15m\": [[open, high, low, close, volume], ...]}}.\n\n"
@@ -794,7 +797,7 @@ def evaluate_hakai_position_management(
     analysis_sink: Optional[Dict[str, Any]] = None,
     current_position_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Optional[HakaiPositionManagementDecision]:
-    """Request a BTCUSDT KEEP/FLIP decision for an existing position."""
+    """Request a BTCUSDT KEEP/CLOSE decision for an existing position."""
     normalized_symbol = str(symbol or "").strip().upper()
     if normalized_symbol != "BTCUSDT":
         logger.error("evaluate_hakai_position_management only supports BTCUSDT | received=%s", symbol)
@@ -853,7 +856,7 @@ def evaluate_hakai_position_management(
     decision = call_result.decision
     raw_response = call_result.raw_response or decision.model_dump_json(indent=2)
     normalized_value = str(getattr(decision, "decision", "") or "").strip().upper()
-    if normalized_value not in {"KEEP", "FLIP"}:
+    if normalized_value not in {"KEEP", "CLOSE"}:
         logger.error("Gemini returned invalid BTC position-management decision=%s", normalized_value)
         return None
 

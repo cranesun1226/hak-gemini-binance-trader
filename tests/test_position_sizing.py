@@ -59,9 +59,19 @@ class FixedPositionSizingTests(unittest.TestCase):
             next_trigger_down=99997.5,
             next_trigger_up=101002.5,
         )
+        close_update = hakai_strategy._build_state_update(
+            previous_state=keep_update,
+            trigger_pct_usdt=0.5,
+            ai_triggered=True,
+            trigger_price=100250.0,
+            ai_decision="CLOSE",
+            next_trigger_down=99748.75,
+            next_trigger_up=100751.25,
+        )
 
         self.assertEqual(flat_update["last_ai_decision"], "FLAT")
         self.assertEqual(keep_update["last_ai_decision"], "KEEP")
+        self.assertEqual(close_update["last_ai_decision"], "CLOSE")
 
 
 if __name__ == "__main__":

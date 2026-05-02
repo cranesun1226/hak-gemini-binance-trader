@@ -16,7 +16,9 @@ class GeminiPromptTests(unittest.TestCase):
             "Initial-entry task: choose LONG, SHORT, or FLAT.",
             prompt,
         )
-        self.assertIn("Choose FLAT for every ambiguous", prompt)
+        self.assertIn("reasonable directional edge", prompt)
+        self.assertIn("Not every factor must be perfect.", prompt)
+        self.assertIn("Choose FLAT when directional evidence is genuinely balanced", prompt)
         self.assertIn(
             "Do not get shaken by ordinary and usual candles.",
             prompt,
@@ -25,7 +27,7 @@ class GeminiPromptTests(unittest.TestCase):
         self.assertIn('"15m"', prompt)
         self.assertNotIn("multi-timeframe", prompt.lower())
 
-    def test_position_management_prompt_uses_keep_or_flip_only(self):
+    def test_position_management_prompt_uses_keep_or_close_only(self):
         prompt = _build_position_management_prompt(
             symbol="BTCUSDT",
             reference_price=100000.0,
@@ -33,9 +35,11 @@ class GeminiPromptTests(unittest.TestCase):
             current_position_snapshot={"direction": "LONG", "size": 0.1},
         )
 
-        self.assertIn("Existing-position task: rationally choose KEEP or FLIP", prompt)
+        self.assertIn("Existing-position task: rationally choose KEEP or CLOSE", prompt)
         self.assertIn("Do not choose a new direction in this response.", prompt)
-        self.assertIn('Schema: {"decision":"KEEP"} or {"decision":"FLIP"}.', prompt)
+        self.assertIn("Default to KEEP when the current position thesis remains reasonably valid.", prompt)
+        self.assertIn("Choose CLOSE only when objective evidence shows", prompt)
+        self.assertIn('Schema: {"decision":"KEEP"} or {"decision":"CLOSE"}.', prompt)
         self.assertIn('"current_position": "LONG"', prompt)
 
 

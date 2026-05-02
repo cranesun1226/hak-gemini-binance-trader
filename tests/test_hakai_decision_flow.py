@@ -102,7 +102,7 @@ class HakaiDecisionFlowTests(unittest.TestCase):
         ), patch(
             "src.strategy.hakai_strategy.evaluate_hakai_entry_direction"
         ) as mocked_entry, patch(
-            "src.strategy.hakai_strategy._close_existing_position_for_flip"
+            "src.strategy.hakai_strategy._close_existing_position_for_ai_close"
         ) as mocked_close, patch(
             "src.strategy.hakai_strategy.set_leverage"
         ) as mocked_set_leverage, patch(
@@ -118,7 +118,7 @@ class HakaiDecisionFlowTests(unittest.TestCase):
         mocked_close.assert_not_called()
         mocked_set_leverage.assert_not_called()
 
-    def test_flip_then_flat_closes_position_without_reentry(self):
+    def test_close_then_flat_closes_position_without_reentry(self):
         state = {"last_ai_trigger_price": 100000.0, "trigger_pct_usdt": 0.5}
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "src.strategy.hakai_strategy._load_strategy_config", return_value=_config()
@@ -140,13 +140,13 @@ class HakaiDecisionFlowTests(unittest.TestCase):
             return_value=hakai_strategy.calculate_position_metrics(_long_position()),
         ), patch(
             "src.strategy.hakai_strategy.evaluate_hakai_position_management",
-            return_value=SimpleNamespace(decision="FLIP"),
+            return_value=SimpleNamespace(decision="CLOSE"),
         ), patch(
             "src.strategy.hakai_strategy.evaluate_hakai_entry_direction",
             return_value=SimpleNamespace(decision="FLAT"),
         ), patch(
-            "src.strategy.hakai_strategy._close_existing_position_for_flip",
-            return_value={"success": True, "action": "flipped_position_closed"},
+            "src.strategy.hakai_strategy._close_existing_position_for_ai_close",
+            return_value={"success": True, "action": "closed_position"},
         ), patch(
             "src.strategy.hakai_strategy.set_leverage"
         ) as mocked_set_leverage, patch(
@@ -157,8 +157,8 @@ class HakaiDecisionFlowTests(unittest.TestCase):
             result = hakai_strategy.run_hakai_cycle(state=state)
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["action"], "flipped_to_flat")
-        self.assertEqual(result["position_ai_decision"], "FLIP")
+        self.assertEqual(result["action"], "closed_to_flat")
+        self.assertEqual(result["position_ai_decision"], "CLOSE")
         self.assertEqual(result["entry_ai_decision"], "FLAT")
         self.assertEqual(result["state_update"]["last_ai_decision"], "FLAT")
         mocked_set_leverage.assert_not_called()
