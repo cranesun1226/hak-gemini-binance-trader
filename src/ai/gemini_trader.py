@@ -411,7 +411,6 @@ def _build_position_management_input_payload(
         "symbol": symbol,
         "current_price": reference_price,
         "current_position": _normalize_prompt_position(current_position_snapshot),
-        "position": dict(current_position_snapshot or {}),
         "ohlcv": timeframe_ohlcv,
     }
 
@@ -444,7 +443,7 @@ def _build_position_management_prompt(
         "Schema: {\"decision\":\"KEEP\"} or {\"decision\":\"CLOSE\"}.\n"
         "Return JSON only.\n"
         "Within the 15m candle array, candle rows are ordered from oldest to most recent.\n"
-        "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"LONG\"|\"SHORT\", \"position\": object, \"ohlcv\": {\"15m\": [[open, high, low, close, volume], ...]}}.\n\n"
+        "Input OHLCV candles' structure: {\"symbol\": str, \"current_price\": number, \"current_position\": \"LONG\"|\"SHORT\", \"ohlcv\": {\"15m\": [[open, high, low, close, volume], ...]}}.\n\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
 

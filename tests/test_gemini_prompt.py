@@ -32,7 +32,7 @@ class GeminiPromptTests(unittest.TestCase):
             symbol="BTCUSDT",
             reference_price=100000.0,
             timeframe_ohlcv={"15m": [[1.0, 2.0, 0.5, 1.5, 100.0] for _ in range(100)]},
-            current_position_snapshot={"direction": "LONG", "size": 0.1},
+            current_position_snapshot={"direction": "LONG", "size": 0.1, "stop_loss": 95000.0},
         )
 
         self.assertIn("Existing-position task: rationally choose KEEP or CLOSE", prompt)
@@ -41,6 +41,9 @@ class GeminiPromptTests(unittest.TestCase):
         self.assertIn("Choose CLOSE only when objective evidence shows", prompt)
         self.assertIn('Schema: {"decision":"KEEP"} or {"decision":"CLOSE"}.', prompt)
         self.assertIn('"current_position": "LONG"', prompt)
+        self.assertNotIn('"position":', prompt)
+        self.assertNotIn('"size":', prompt)
+        self.assertNotIn('"stop_loss":', prompt)
 
 
 if __name__ == "__main__":
